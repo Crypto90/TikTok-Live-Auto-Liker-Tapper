@@ -1,3 +1,5 @@
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/K3K314GUP)
+
 # TikTok Live Auto Liker / Tapper
 
 A lightweight Windows desktop application built with Python and CustomTkinter that automates "liking" on TikTok Live streams. It works by sending virtual keypresses ('L') to a specific TikTok window, even if it is running in the background.
