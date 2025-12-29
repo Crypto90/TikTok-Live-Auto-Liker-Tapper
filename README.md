@@ -9,7 +9,7 @@ A lightweight Windows desktop application built with Python and CustomTkinter th
 - **Multi-threaded:** The UI remains responsive while the tapper runs in the background.
 
 ## 📖 How to Use
-Open TikTok Live in your web browser (Chrome, Edge, etc.).
+Open TikTok Live in your web browser (Chrome, Edge, etc.) or use the tiktok web app from the windows app store.
 
 Launch this application.
 
