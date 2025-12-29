@@ -8,6 +8,11 @@ A lightweight Windows desktop application built with Python and CustomTkinter th
 - **Modern UI:** Clean, dark-mode interface powered by CustomTkinter.
 - **Multi-threaded:** The UI remains responsive while the tapper runs in the background.
 
+<img width="452" height="432" alt="image" src="https://github.com/user-attachments/assets/2950cb82-abc6-4d69-912f-054c6631c2cb" />
+<img width="452" height="432" alt="image" src="https://github.com/user-attachments/assets/8472c83d-1dd9-4251-a9dd-bb43223fdb31" />
+
+
+
 ## 📖 How to Use
 Open TikTok Live in your web browser (Chrome, Edge, etc.) or use the tiktok web app from the windows app store.
 
