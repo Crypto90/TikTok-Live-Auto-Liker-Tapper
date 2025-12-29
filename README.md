@@ -8,4 +8,23 @@ A lightweight Windows desktop application built with Python and CustomTkinter th
 - **Modern UI:** Clean, dark-mode interface powered by CustomTkinter.
 - **Multi-threaded:** The UI remains responsive while the tapper runs in the background.
 
-## 🛠️ Installation
+## 📖 How to Use
+Open TikTok Live in your web browser (Chrome, Edge, etc.).
+
+Launch this application.
+
+Click Refresh List if your window isn't visible.
+
+Select the correct TikTok window from the dropdown.
+
+Click START TAPPING.
+
+To stop, simply click STOP TAPPING.
+
+## ⚠️ Requirements
+Windows OS (Required for win32gui and pygetwindow)
+
+Python 3.7+
+
+## ⚖️ Disclaimer
+This tool is for educational purposes only. Automated interaction with TikTok may violate their Terms of Service. Use at your own risk.
