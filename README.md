@@ -21,10 +21,5 @@ Click START TAPPING.
 
 To stop, simply click STOP TAPPING.
 
-## ⚠️ Requirements
-Windows OS (Required for win32gui and pygetwindow)
-
-Python 3.7+
-
 ## ⚖️ Disclaimer
 This tool is for educational purposes only. Automated interaction with TikTok may violate their Terms of Service. Use at your own risk.
