@@ -12,7 +12,7 @@ class TikTokAutoLiker(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        self.title("TikTok Live Auto Liker / Tapper")
+        self.title("TikTok Live Auto Liker / Tapper v1.0.1")
         self.geometry("450x480")  # Increased height slightly for new checkbox
         self.is_running = False
 
@@ -129,3 +129,4 @@ class TikTokAutoLiker(ctk.CTk):
 if __name__ == "__main__":
     app = TikTokAutoLiker()
     app.mainloop()
+
