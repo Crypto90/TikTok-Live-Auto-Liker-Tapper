@@ -13,7 +13,7 @@ class TikTokAutoLiker(ctk.CTk):
         super().__init__()
 
         self.title("TikTok Live Auto Liker / Tapper")
-        self.geometry("450x400")
+        self.geometry("450x480")  # Increased height slightly for new checkbox
         self.is_running = False
 
         # --- Header ---
@@ -28,8 +28,15 @@ class TikTokAutoLiker(ctk.CTk):
         self.window_list.pack(pady=5)
         
         self.refresh_btn = ctk.CTkButton(self, text="Refresh List", command=self.refresh_windows, 
-                                        fg_color="#333333", hover_color="#444444")
+                                         fg_color="#333333", hover_color="#444444")
         self.refresh_btn.pack(pady=10)
+
+        # --- Options ---
+        # NEW: Checkbox to stop if title changes
+        self.stop_on_change = ctk.CTkCheckBox(self, text="Stop if window title changes", 
+                                              font=("Roboto", 12))
+        self.stop_on_change.select() # Enabled by default
+        self.stop_on_change.pack(pady=10)
 
         # --- Status Indicator ---
         self.status_box = ctk.CTkLabel(self, text="● System Ready", text_color="gray", font=("Roboto", 12))
@@ -44,11 +51,8 @@ class TikTokAutoLiker(ctk.CTk):
         self.refresh_windows()
 
     def refresh_windows(self):
-        # Define what we want to ignore
-        # self.title is the title of your program ("TikTok Live Auto Liker / Tapper")
         excluded_keywords = ["notepad", "cmd.exe", "command prompt", self.title().lower()]
         
-        # Filter: Must contain "TikTok" AND NOT contain any excluded keywords
         titles = [
             w.title for w in gw.getAllWindows() 
             if "tiktok" in w.title.lower() 
@@ -69,32 +73,56 @@ class TikTokAutoLiker(ctk.CTk):
 
     def toggle_action(self):
         if not self.is_running:
-            self.is_running = True
-            self.start_btn.configure(text="STOP TAPPING", fg_color="#D32F2F", hover_color="#F44336")
-            self.status_box.configure(text="● ACTIVE: Tapping 'L'", text_color="#00C853")
-            threading.Thread(target=self.run_tapper, daemon=True).start()
+            self.start_tapping()
         else:
-            self.is_running = False
-            self.start_btn.configure(text="START TAPPING", fg_color="#00C853", hover_color="#00E676")
-            self.status_box.configure(text="● Stopped", text_color="gray")
+            self.stop_tapping()
+
+    def start_tapping(self):
+        self.is_running = True
+        self.start_btn.configure(text="STOP TAPPING", fg_color="#D32F2F", hover_color="#F44336")
+        self.status_box.configure(text="● ACTIVE: Tapping 'L'", text_color="#00C853")
+        threading.Thread(target=self.run_tapper, daemon=True).start()
+
+    def stop_tapping(self, status_msg="● Stopped"):
+        """Stops the loop and resets UI."""
+        self.is_running = False
+        self.start_btn.configure(text="START TAPPING", fg_color="#00C853", hover_color="#00E676")
+        self.status_box.configure(text=status_msg, text_color="gray")
 
     def run_tapper(self):
         target_title = self.window_list.get()
         hwnd = win32gui.FindWindow(None, target_title)
         
         if not hwnd:
-            self.is_running = False
+            # Use 'after' to update UI from thread safely
+            self.after(0, lambda: self.stop_tapping("● Error: Window not found"))
             return
 
+        # Store the initial title to compare against later
+        initial_title = win32gui.GetWindowText(hwnd)
         L_KEY = 0x4C
 
         while self.is_running:
-            # Force background focus signal
-            win32gui.SendMessage(hwnd, win32con.WM_ACTIVATE, win32con.WA_ACTIVE, 0)
-            
-            # Send the key press
-            win32api.PostMessage(hwnd, win32con.WM_KEYDOWN, L_KEY, 0)
-            win32api.PostMessage(hwnd, win32con.WM_CHAR, L_KEY, 0)
+            # --- Check Title Change ---
+            if self.stop_on_change.get() == 1:
+                current_title = win32gui.GetWindowText(hwnd)
+                if current_title != initial_title:
+                    # Title changed! Stop everything.
+                    print(f"Title changed from '{initial_title}' to '{current_title}'. Stopping.")
+                    self.after(0, lambda: self.stop_tapping("● Stopped: Title Changed"))
+                    return
+
+            # --- Tapping Logic ---
+            try:
+                # Force background focus signal
+                win32gui.SendMessage(hwnd, win32con.WM_ACTIVATE, win32con.WA_ACTIVE, 0)
+                
+                # Send the key press
+                win32api.PostMessage(hwnd, win32con.WM_KEYDOWN, L_KEY, 0)
+                win32api.PostMessage(hwnd, win32con.WM_CHAR, L_KEY, 0)
+            except Exception as e:
+                self.after(0, lambda: self.stop_tapping("● Error: Window lost"))
+                return
             
             time.sleep(0.1) # Frequency of likes
 
