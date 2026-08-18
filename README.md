@@ -1,6 +1,8 @@
 [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/K3K314GUP?ref=tiktok_live_auto_liker_readme)
 
-<img src="icon.png" width="200" height="200" align="center" alt="App Icon">
+<a href="https://ko-fi.com/K3K314GUP?ref=tiktok_live_auto_liker_readme">
+  <img src="icon.png" width="200" height="200" align="center" alt="App Icon">
+</a>
 
 # TikTok Live Auto Liker / Tapper
 
