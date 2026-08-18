@@ -239,10 +239,10 @@ class SettingsManager:
 
 
 class CheckerWorker(QObject):
-    status_checked = pyqtSignal(str, bool, str)
+    status_checked = pyqtSignal(str, bool, str, bool)  # (username, is_live, avatar_url, is_error)
     ready = pyqtSignal(object)
 
-    # Timeout: if a check doesn't complete in 20s, force it done
+    # Timeout: if a check doesn't complete in 20s, force it done (reported as error for retry)
     TIMEOUT_MS = 20000
 
     def __init__(self, parent=None):
@@ -267,19 +267,19 @@ class CheckerWorker(QObject):
         self._watchdog.start(self.TIMEOUT_MS)
         self.webview.load_url(f"https://www.tiktok.com/@{username}/live")
 
-    def _finish(self, is_live, avatar_url=""):
+    def _finish(self, is_live, avatar_url="", is_error=False):
         """Single exit point — prevents double-emitting if watchdog fires late."""
         if self._done:
             return
         self._done = True
         self._watchdog.stop()
-        self.status_checked.emit(self.current_user, bool(is_live), str(avatar_url))
+        self.status_checked.emit(self.current_user, bool(is_live), str(avatar_url), bool(is_error))
         self.ready.emit(self)
 
     @pyqtSlot()
     def _on_timeout(self):
-        """Watchdog fired — worker is stuck, release it back to the pool."""
-        self._finish(False, "")
+        """Watchdog fired — worker is stuck, report as error for retry."""
+        self._finish(False, "", is_error=True)
 
     def _on_core_init(self, core_wv2):
         try:
@@ -292,9 +292,10 @@ class CheckerWorker(QObject):
                 QMetaObject.invokeMethod(self, "_nav_failed", Qt.ConnectionType.QueuedConnection)
                 return
             
-            current_url = sender.Source
+            current_url = str(sender.Source)
+            # If TikTok redirected away from /live to profile, creator is confirmed OFFLINE
             if "/live" not in current_url:
-                QMetaObject.invokeMethod(self, "_nav_failed", Qt.ConnectionType.QueuedConnection)
+                QMetaObject.invokeMethod(self, "_nav_offline", Qt.ConnectionType.QueuedConnection)
                 return
                 
             QTimer.singleShot(4000, lambda: QMetaObject.invokeMethod(self, "_check_js", Qt.ConnectionType.QueuedConnection))
@@ -304,14 +305,22 @@ class CheckerWorker(QObject):
 
     @pyqtSlot()
     def _nav_failed(self):
-        self._finish(False, "")
+        """Navigation error / network failure."""
+        self._finish(False, "", is_error=True)
+
+    @pyqtSlot()
+    def _nav_offline(self):
+        """Redirected away from /live — clean offline result."""
+        self._finish(False, "", is_error=False)
 
     @pyqtSlot()
     def _check_js(self):
         if self._done:
             return
         js_code = """return (function() {
-            var video = document.querySelector('video') !== null || document.querySelector('[data-e2e="live-video"]') !== null;
+            var video = document.querySelector('video') !== null || 
+                        document.querySelector('[data-e2e="live-video"]') !== null ||
+                        document.querySelector('.tiktok-web-player') !== null;
             var img = document.querySelector('img[class*="Avatar"], img[class*="avatar"]');
             var avatar = img ? img.src : '';
             return JSON.stringify({ is_live: video, avatar_url: avatar });
@@ -326,30 +335,47 @@ class CheckerWorker(QObject):
             data = json.loads(res_str)
             is_live = data.get('is_live', False)
             avatar_url = data.get('avatar_url', '')
-        except:
-            is_live = False
-            avatar_url = ''
-        self._finish(is_live, avatar_url)
+            self._finish(is_live, avatar_url, is_error=False)
+        except Exception:
+            self._finish(False, "", is_error=True)
 
 
 class LiveChecker(QObject):
-    status_checked = pyqtSignal(str, bool, str)
+    status_checked = pyqtSignal(str, bool, str, bool)
 
-    def __init__(self, pool_size=4):
+    def __init__(self, pool_size=4, max_retries=2):
         super().__init__()
         self.queue = []
+        self.retry_counts = {}
+        self.max_retries = max_retries
         self.workers = []
         self.idle_workers = []
         for _ in range(pool_size):
             worker = CheckerWorker(self)
-            worker.status_checked.connect(self.status_checked.emit)
+            worker.status_checked.connect(self._on_worker_status)
             worker.ready.connect(self._on_worker_ready)
             self.workers.append(worker)
             self.idle_workers.append(worker)
 
     def check_users(self, users):
         if not users: return
-        self.queue.extend(users)
+        for u in users:
+            self.retry_counts[u] = 0
+            if u not in self.queue:
+                self.queue.append(u)
+        self._process_queue()
+
+    def _on_worker_status(self, username, is_live, avatar_url, is_error):
+        if is_error and self.retry_counts.get(username, 0) < self.max_retries:
+            self.retry_counts[username] += 1
+            # Schedule retry after a 2-second pause without emitting error to main app
+            QTimer.singleShot(2000, lambda u=username: self._requeue_user(u))
+        else:
+            self.status_checked.emit(username, is_live, avatar_url, is_error)
+
+    def _requeue_user(self, username):
+        if username not in self.queue:
+            self.queue.append(username)
         self._process_queue()
 
     def _on_worker_ready(self, worker):
@@ -1476,7 +1502,7 @@ class TikTokAutoLikerApp(QMainWindow):
         finally:
             self._rebuilding_sort = False
 
-    def on_live_status(self, username, is_live, avatar_url=""):
+    def on_live_status(self, username, is_live, avatar_url="", is_error=False):
         if username not in self.favorites:
             return
 
@@ -1487,16 +1513,28 @@ class TikTokAutoLikerApp(QMainWindow):
             completed = self._completed_checks
             self.status_label.setText(f"● Checking live status... ({completed}/{total})")
 
-        if username in self.fav_widgets:
-            self.fav_widgets[username].set_status(is_live)
-            if avatar_url and getattr(self.fav_widgets[username], 'current_avatar_url', None) != avatar_url:
-                self.fav_widgets[username].current_avatar_url = avatar_url
-                self._download_avatar(username, avatar_url)
+        # If check resulted in a network/timeout error (even after retries), DO NOT alter state or close stream tabs
+        if is_error:
+            if total > 0 and getattr(self, '_completed_checks', 0) >= total:
+                self._pending_checks = 0
+                self._completed_checks = 0
+                self._update_status_label()
+            return
+
+        if not hasattr(self, 'known_live'):
+            self.known_live = set()
+        if not hasattr(self, 'consecutive_offline'):
+            self.consecutive_offline = {}
 
         if is_live:
-            if not hasattr(self, 'known_live'):
-                self.known_live = set()
+            self.consecutive_offline[username] = 0
             self.known_live.add(username)
+            if username in self.fav_widgets:
+                self.fav_widgets[username].set_status(True)
+                if avatar_url and getattr(self.fav_widgets[username], 'current_avatar_url', None) != avatar_url:
+                    self.fav_widgets[username].current_avatar_url = avatar_url
+                    self._download_avatar(username, avatar_url)
+
             self._sort_list()                  # Re-sort as each result arrives
             tapper_enabled = self.favorites.get(username, True)
             if username not in self.active_streams and tapper_enabled:
@@ -1510,17 +1548,24 @@ class TikTokAutoLikerApp(QMainWindow):
                 self.active_streams[username] = tab
                 self._update_waiting_tab()
         else:
-            if hasattr(self, 'known_live'):
+            # Increment consecutive offline counter
+            self.consecutive_offline[username] = self.consecutive_offline.get(username, 0) + 1
+
+            # Require 2 consecutive clean offline checks before marking offline & closing active stream tab
+            if self.consecutive_offline[username] >= 2:
                 self.known_live.discard(username)
-            self._sort_list()                  # Re-sort as each result arrives
-            if username in self.active_streams:
-                tab_idx = self.tabs.indexOf(self.active_streams[username])
-                if tab_idx != -1:
-                    self.tabs.removeTab(tab_idx)
-                self.active_streams[username].cleanup()
-                self.active_streams[username].deleteLater()
-                del self.active_streams[username]
-                self._update_waiting_tab()
+                if username in self.fav_widgets:
+                    self.fav_widgets[username].set_status(False)
+                self._sort_list()                  # Re-sort as each result arrives
+
+                if username in self.active_streams:
+                    tab_idx = self.tabs.indexOf(self.active_streams[username])
+                    if tab_idx != -1:
+                        self.tabs.removeTab(tab_idx)
+                    self.active_streams[username].cleanup()
+                    self.active_streams[username].deleteLater()
+                    del self.active_streams[username]
+                    self._update_waiting_tab()
 
         # When all results are in, switch to the summary label
         if total > 0 and getattr(self, '_completed_checks', 0) >= total:
