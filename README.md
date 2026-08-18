@@ -24,8 +24,8 @@ A powerful desktop application built with Python, PyQt6, and WebView2 that autom
 - **Login & Explore Integration**: Integrated tabs to log into your TikTok account and explore live streams directly inside the application.
 - **Modern Dark UI**: Sleek dark-mode interface with styled container boxes, horizontal-scroll prevention, and a pulsing status indicator when idle.
 
-<img width="452" height="432" alt="image" src="https://github.com/user-attachments/assets/2950cb82-abc6-4d69-912f-054c6631c2cb" />
-<img width="452" height="432" alt="image" src="https://github.com/user-attachments/assets/8472c83d-1dd9-4251-a9dd-bb43223fdb31" />
+<img width="1372" height="832" alt="image" src="https://github.com/user-attachments/assets/2d662b62-e54f-42ca-a91d-2285641963c6" />
+
 
 ## 📖 How to Use
 
