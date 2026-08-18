@@ -39,6 +39,27 @@ A powerful desktop application built with Python, PyQt6, and WebView2 that autom
 6. **Automated Monitoring & Tapping**: Sit back while the app monitors your list in the background. When a favorite user goes live with auto-tapper enabled, their stream opens in a tab and tapping begins automatically!
 7. **Adjust Tapping Speed**: Customize base delay and randomization sliders under **Liking Settings** as desired.
 
+## 🔨 Building Standalone Executable (.exe)
+
+You can build a standalone Windows executable (`TikTokLiveAutoLiker.exe`) using PyInstaller:
+
+1. **Install Prerequisites**:
+   ```bash
+   pip install PyQt6 PyQt6-WebEngine qtwebview2 pyinstaller
+   ```
+
+2. **Build executable using PowerShell / CMD**:
+   To ensure the WebView2 .NET assemblies (`Microsoft.Web.WebView2.WinForms.dll`, `WebView2Loader.dll`) are correctly bundled, include the `qtwebview2/lib` data path:
+
+   **PowerShell:**
+   ```powershell
+   $qtlib = (python -c "import qtwebview2, os; print(os.path.join(os.path.dirname(qtwebview2.__file__), 'lib'))")
+   pyinstaller --noconsole --onefile --clean --name="TikTokLiveAutoLiker" --add-data "${qtlib};lib" tiktok_live_auto_liker_tapper.py
+   ```
+
+3. **Output Executable**:
+   The compiled standalone binary will be located in the `dist/` directory (`dist/TikTokLiveAutoLiker.exe`).
+
 ## 💖 Support
 
 If you find this project useful, you can support development via Ko-fi:
