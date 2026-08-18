@@ -1,0 +1,17 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Runtime & User Data
+userdata/
+avatars/
+favorites.json
+settings.json
+
+# Logs & Debugging
+*.log
+
+# Operating System Files
+.DS_Store
+Thumbs.db
