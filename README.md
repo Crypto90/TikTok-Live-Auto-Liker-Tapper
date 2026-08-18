@@ -1,6 +1,8 @@
-[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/K3K314GUP?ref=tiktok_live_auto_liker_readme)
+<a href="https://ko-fi.com/K3K314GUP?ref=tiktok_live_auto_liker_readme" target="_blank" rel="noopener noreferrer">
+  <img src="https://ko-fi.com/img/githubbutton_sm.svg" alt="ko-fi">
+</a>
 
-<a href="https://ko-fi.com/K3K314GUP?ref=tiktok_live_auto_liker_readme">
+<a href="https://ko-fi.com/K3K314GUP?ref=tiktok_live_auto_liker_readme" target="_blank" rel="noopener noreferrer">
   <img src="icon.png" width="200" height="200" align="center" alt="App Icon">
 </a>
 
@@ -68,7 +70,9 @@ You can build a standalone Windows executable (`TikTokLiveAutoLiker.exe`) using 
 
 If you find this project useful, you can support development via Ko-fi:
 
-[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/K3K314GUP?ref=tiktok_live_auto_liker_readme)
+<a href="https://ko-fi.com/K3K314GUP?ref=tiktok_live_auto_liker_readme" target="_blank" rel="noopener noreferrer">
+  <img src="https://ko-fi.com/img/githubbutton_sm.svg" alt="ko-fi">
+</a>
 
 ## ⚖️ Disclaimer
 
