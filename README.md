@@ -1,6 +1,6 @@
 [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/K3K314GUP?ref=tiktok_live_auto_liker_readme)
 
-# TikTok Live Auto Liker / Tapper
+# <img src="icon.png" width="48" height="48" align="center" alt="App Icon"> TikTok Live Auto Liker / Tapper
 
 A powerful desktop application built with Python, PyQt6, and WebView2 that automatically monitors your favorite TikTok creators and auto-taps (likes) their live streams in real-time.
 
