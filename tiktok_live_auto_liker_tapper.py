@@ -522,6 +522,10 @@ class TikTokAutoLikerApp(QMainWindow):
         self.setWindowTitle(f"TikTok Live Auto Liker {APP_VERSION}")
         self.resize(1370, 800)
 
+        icon_path = os.path.join(getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__))), "icon.png")
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
+
         self.favorites = SettingsManager.load_favorites()
         self.settings = SettingsManager.load_settings()
         self.active_streams = {} 
