@@ -445,8 +445,8 @@ class LiveTab(QWidget):
             url=f"https://www.tiktok.com/@{self.username}/live",
             lazyload=False,
             user_data_folder="./userdata",
-            debug_enabled=True,
-            context_menus_enabled=True,
+            debug=True,
+            context_menus=True,
             init_settings_hook=self._on_live_core_init
         )
         layout.addWidget(self.webview)
@@ -482,7 +482,8 @@ class LiveTab(QWidget):
         def on_source_changed(sender, args):
             url_str = str(sender.Source)
             QTimer.singleShot(0, lambda: self._check_url_redirect(url_str))
-        core_wv2.SourceChanged += on_source_changed
+        self._source_changed_handler = on_source_changed
+        core_wv2.SourceChanged += self._source_changed_handler
 
     def _check_url_redirect(self, url):
         """Detect if TikTok has redirected us to a different streamer's live page."""
@@ -785,9 +786,9 @@ class TikTokAutoLikerApp(QMainWindow):
         is_enabled = self.favorites.get(username, True)
         is_muted = self.settings.setdefault("muted_users", {}).get(username, True)
         widget = UserListItem(username, is_enabled, is_muted)
-        widget.toggle_btn.clicked.connect(lambda: self.toggle_tapper(username))
-        widget.mute_btn.clicked.connect(lambda: self.toggle_mute(username))
-        widget.del_btn.clicked.connect(lambda: self.remove_favorite(username))
+        widget.toggle_btn.clicked.connect(lambda _, un=username: QTimer.singleShot(0, lambda: self.toggle_tapper(un)))
+        widget.mute_btn.clicked.connect(lambda _, un=username: QTimer.singleShot(0, lambda: self.toggle_mute(un)))
+        widget.del_btn.clicked.connect(lambda _, un=username: QTimer.singleShot(0, lambda: self.remove_favorite(un)))
         
         avatar_path = os.path.join("avatars", f"{username}.png")
         if os.path.exists(avatar_path):
@@ -1381,15 +1382,18 @@ class TikTokAutoLikerApp(QMainWindow):
             
         def on_source_changed(sender, args):
             url_str = sender.Source
-            if "tiktok.com" in url_str and "login" not in url_str:
+            if "login" not in url_str.lower() and "tiktok.com" in url_str.lower():
                 QMetaObject.invokeMethod(self, "_on_login_success", Qt.ConnectionType.QueuedConnection)
-        core_wv2.SourceChanged += on_source_changed
+        
+        self._login_source_changed_handler = on_source_changed
+        core_wv2.SourceChanged += self._login_source_changed_handler
 
     def _on_explore_core_init(self, core_wv2):
         def on_source_changed(sender, args):
             url_str = sender.Source
             QTimer.singleShot(0, lambda: self._handle_explore_url(url_str))
-        core_wv2.SourceChanged += on_source_changed
+        self._explore_source_changed_handler = on_source_changed
+        core_wv2.SourceChanged += self._explore_source_changed_handler
 
     def _handle_explore_url(self, url):
         if "tiktok.com/@" in url and "/live" in url:
@@ -1637,15 +1641,7 @@ class TikTokAutoLikerApp(QMainWindow):
             elif isinstance(self.favorites, dict):
                 del self.favorites[username]
                 
-        # Find item in fav_list and remove it
-        for i in range(self.fav_list.count()):
-            item = self.fav_list.item(i)
-            if item.data(Qt.ItemDataRole.UserRole) == username:
-                self.fav_list.takeItem(i)
-                break
-                
-        if username in self.fav_widgets:
-            del self.fav_widgets[username]
+        self._sort_list()
         SettingsManager.save_favorites(self.favorites)
         self.status_label.setText(f"● Removed {username} from favorites.")
         
@@ -1659,7 +1655,8 @@ class TikTokAutoLikerApp(QMainWindow):
             self._update_waiting_tab()
             self._fallback_tab_selection()
         
-        self.checker.queue = [u for u in self.checker.queue if u != username]
+        if getattr(self, 'is_monitoring', False) and hasattr(self, 'checker'):
+            self.checker.queue = [u for u in self.checker.queue if u != username]
 
     def save_settings_ui(self):
         self.settings["like_delay_ms"] = self.delay_slider.value()
@@ -1819,13 +1816,15 @@ class TikTokAutoLikerApp(QMainWindow):
         if getattr(self, '_rebuilding_sort', False):
             return  # Re-entry guard — we are already inside a rebuild
         count = self.fav_list.count()
-        if count <= 1:
+        if count == 0:
             return
 
         usernames = [
             self.fav_list.item(i).data(Qt.ItemDataRole.UserRole)
             for i in range(count)
         ]
+        
+        filtered_usernames = [u for u in usernames if u in self.favorites]
 
         key = self.sort_key
         reverse = self.sort_reverse
@@ -1839,7 +1838,7 @@ class TikTokAutoLikerApp(QMainWindow):
             if key == 'mute':   return muted_map.get(un, True)
             return un.lower()
 
-        sorted_usernames = sorted(usernames, key=sort_key_fn, reverse=reverse)
+        sorted_usernames = sorted(filtered_usernames, key=sort_key_fn, reverse=reverse)
         if sorted_usernames == usernames:
             return  # Already in order — no rebuild needed
 
