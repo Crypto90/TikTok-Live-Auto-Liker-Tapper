@@ -8,10 +8,11 @@ os.environ["QT_LOGGING_RULES"] = "qt.qpa.fonts.warning=false"
 
 import json
 import random
+import shutil
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QListWidget, QSpinBox, QSlider,
-    QTabWidget, QSplitter, QGroupBox, QFormLayout, QMessageBox, QListWidgetItem, QFrame
+    QTabWidget, QSplitter, QGroupBox, QFormLayout, QMessageBox, QListWidgetItem, QFrame, QFileDialog
 )
 from PyQt6.QtCore import Qt, QUrl, QTimer, pyqtSignal, QObject, pyqtSlot, QMetaObject, qInstallMessageHandler
 from PyQt6.QtGui import QPainter, QColor, QIcon, QPixmap, QPainterPath, QDesktopServices, QFont
@@ -24,7 +25,7 @@ def _qt_message_handler(mode, context, message):
     if "setPointSize" in message or "Point size" in message:
         return
 
-APP_VERSION = "v1.0.2"
+APP_VERSION = "v1.0.3"
 GITHUB_REPO = "Crypto90/TikTok-Live-Auto-Liker-Tapper"
 
 FAVORITES_FILE = "favorites.json"
@@ -242,8 +243,8 @@ class CheckerWorker(QObject):
     status_checked = pyqtSignal(str, bool, str, bool)  # (username, is_live, avatar_url, is_error)
     ready = pyqtSignal(object)
 
-    # Timeout: if a check doesn't complete in 20s, force it done (reported as error for retry)
-    TIMEOUT_MS = 20000
+    # Timeout: if a check doesn't complete in 30s, force it done (reported as error for retry)
+    TIMEOUT_MS = 30000
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -310,8 +311,33 @@ class CheckerWorker(QObject):
 
     @pyqtSlot()
     def _nav_offline(self):
-        """Redirected away from /live — clean offline result."""
-        self._finish(False, "", is_error=False)
+        """Redirected away from /live — user is offline, but try to grab avatar from profile page."""
+        QTimer.singleShot(3000, lambda: QMetaObject.invokeMethod(
+            self, "_check_profile_avatar_js", Qt.ConnectionType.QueuedConnection
+        ))
+
+    @pyqtSlot()
+    def _check_profile_avatar_js(self):
+        """Extract avatar from the user's TikTok profile page (works even when offline)."""
+        if self._done:
+            return
+        js_code = """return (function() {
+            var img = document.querySelector('img[data-e2e="user-avatar"]')
+                   || document.querySelector('img[class*="Avatar"], img[class*="avatar"]');
+            return JSON.stringify({ avatar_url: img ? img.src : '' });
+        })();"""
+        self.webview.evaluate_js(js_code, self._on_profile_avatar_result)
+
+    def _on_profile_avatar_result(self, result_dict):
+        """Handle avatar extraction result from profile page."""
+        res_str = result_dict.get('result', '{}')
+        if not isinstance(res_str, str): res_str = '{}'
+        try:
+            data = json.loads(res_str)
+            avatar_url = data.get('avatar_url', '')
+        except Exception:
+            avatar_url = ''
+        self._finish(False, avatar_url, is_error=False)
 
     @pyqtSlot()
     def _check_js(self):
@@ -395,43 +421,95 @@ class LiveChecker(QObject):
                 worker.webview.deleteLater()
 
 class LiveTab(QWidget):
+    # Signal emitted when stream end is detected in-tab: (username, reason)
+    stream_ended = pyqtSignal(str, str)
+
     def __init__(self, username, settings, tapper_enabled=True, is_muted=True):
         super().__init__()
         self.username = username
         self.settings = settings
         self.tapper_enabled = tapper_enabled
         self.is_muted = is_muted
-        
+        self._core_wv2 = None
+        self._is_background = False
+        self._stream_end_detected = False
+
+        # Stream health tracking
+        self._last_video_time = -1.0
+        self._stall_count = 0
+        self._STALL_THRESHOLD = 3  # 3 consecutive stalls (~45s) = stream ended
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        
+
         self.webview = QtWebView2Widget(
             url=f"https://www.tiktok.com/@{self.username}/live",
             lazyload=False,
             user_data_folder="./userdata",
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0"
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0",
+            init_settings_hook=self._on_live_core_init
         )
         layout.addWidget(self.webview)
 
+        # Like timer — background liking works via visibility spoofing in _do_like JS
         self.like_timer = QTimer(self)
         self.like_timer.timeout.connect(self._do_like)
         self.like_timer.start(self._get_next_delay())
-        
+
         self.mute_timer = QTimer(self)
         self.mute_timer.timeout.connect(self._enforce_mute)
         self.mute_timer.start(500)
 
+        # Stream health monitor — checks every 15s for stream end/stall/redirect
+        self._health_timer = QTimer(self)
+        self._health_timer.timeout.connect(self._check_stream_health_js)
+        self._health_timer.start(15000)
+
+        # DOM cleanup timer — trims chat and removes gift overlays every 30s
+        self._cleanup_timer = QTimer(self)
+        self._cleanup_timer.timeout.connect(self._run_dom_cleanup)
+        self._cleanup_timer.start(30000)
+
+    def _on_live_core_init(self, core_wv2):
+        """Store CoreWebView2 reference for memory management and URL monitoring."""
+        self._core_wv2 = core_wv2
+        try:
+            core_wv2.IsMuted = self.is_muted
+        except Exception:
+            pass
+
+        # Monitor URL changes to detect redirects to other streamers
+        def on_source_changed(sender, args):
+            url_str = str(sender.Source)
+            QTimer.singleShot(0, lambda: self._check_url_redirect(url_str))
+        core_wv2.SourceChanged += on_source_changed
+
+    def _check_url_redirect(self, url):
+        """Detect if TikTok has redirected us to a different streamer's live page."""
+        if self._stream_end_detected:
+            return
+        expected = f"tiktok.com/@{self.username}/live"
+        if url and "tiktok.com/@" in url and "/live" in url and expected.lower() not in url.lower():
+            self._signal_stream_ended("redirected_to_other_streamer")
+        elif url and "tiktok.com/@" in url and "/live" not in url:
+            # Redirected away from /live entirely (e.g. to profile page)
+            self._signal_stream_ended("redirected_away_from_live")
+
     def _enforce_mute(self):
         js = f"document.querySelectorAll('video, audio').forEach(v => v.muted = {'true' if self.is_muted else 'false'});"
         self.webview.evaluate_js(js)
-        
+
     def set_muted(self, muted):
         self.is_muted = muted
+        if self._core_wv2:
+            try:
+                self._core_wv2.IsMuted = muted
+            except Exception:
+                pass
         self._enforce_mute()
 
     def _get_next_delay(self):
         base = self.settings.get("like_delay_ms", 100)
-        import random
         rand = self.settings.get("randomization_ms", 50)
         return max(50, base + random.randint(0, rand))
 
@@ -439,10 +517,13 @@ class LiveTab(QWidget):
         if not getattr(self, 'tapper_enabled', True):
             self.like_timer.start(self._get_next_delay())
             return
-            
+
         delay = self._get_next_delay()
         burst_js = "setTimeout(triggerTap, 50);" if delay > 400 else ""
-        
+
+        # Note: visibility spoofing ensures this works in background tabs.
+        # The background-mode CSS only hides the video visually — the DOM element
+        # is still present and events dispatch normally.
         js_code = f"""
         (function() {{
             // Spoof visibility so TikTok thinks the background tab is active
@@ -476,11 +557,185 @@ class LiveTab(QWidget):
         """
         self.webview.evaluate_js(js_code)
         self.like_timer.start(delay)
-        
+
+    # --- Stream Health Monitor ---
+
+    def _check_stream_health_js(self):
+        """Run a JS probe to detect if the stream has ended, stalled, or been redirected."""
+        if self._stream_end_detected:
+            return
+        js_code = """return (function() {
+            var signals = {};
+            var video = document.querySelector('video');
+            signals.has_video = !!video;
+            signals.video_paused = video ? video.paused : true;
+            signals.video_ended = video ? video.ended : true;
+            signals.video_current_time = video ? video.currentTime : 0;
+            signals.video_ready_state = video ? video.readyState : 0;
+
+            var body_text = document.body ? document.body.innerText : '';
+            signals.has_ended_text = /live.has.ended|stream.ended|broadcast.ended|replay|this live has ended|host.has.ended/i.test(body_text);
+
+            signals.has_follow_overlay = !!document.querySelector('[data-e2e="live-end-follow"], [data-e2e="live-end-card"]');
+
+            signals.current_url = window.location.href;
+            return JSON.stringify(signals);
+        })();"""
+        self.webview.evaluate_js(js_code, self._on_stream_health_result)
+
+    def _on_stream_health_result(self, result_dict):
+        """Analyze stream health signals and decide if the stream has ended."""
+        if self._stream_end_detected:
+            return
+        res_str = result_dict.get('result', '{}')
+        if not isinstance(res_str, str):
+            res_str = '{}'
+        try:
+            signals = json.loads(res_str)
+        except Exception:
+            return  # Can't parse — skip this probe
+
+        # 1. Check for explicit "ended" text or overlay
+        if signals.get('has_ended_text', False) or signals.get('has_follow_overlay', False):
+            self._signal_stream_ended("stream_ended_overlay")
+            return
+
+        # 2. Check for URL redirect (another streamer or away from /live)
+        current_url = signals.get('current_url', '')
+        expected = f"tiktok.com/@{self.username}/live"
+        if current_url:
+            if "tiktok.com/@" in current_url and "/live" in current_url and expected.lower() not in current_url.lower():
+                self._signal_stream_ended("redirected_to_other_streamer")
+                return
+            if "tiktok.com/@" in current_url and "/live" not in current_url:
+                self._signal_stream_ended("redirected_away_from_live")
+                return
+
+        # 3. Check for video stall (no time progress across consecutive probes)
+        if not signals.get('has_video', False):
+            # No video element at all — stream likely ended
+            self._stall_count += 1
+            if self._stall_count >= self._STALL_THRESHOLD:
+                self._signal_stream_ended("no_video_element")
+            return
+
+        video_time = signals.get('video_current_time', 0)
+        if signals.get('video_ended', False):
+            self._signal_stream_ended("video_ended_event")
+            return
+
+        # Only count as stall if video is not user-paused and time hasn't progressed
+        if not signals.get('video_paused', False):
+            if self._last_video_time >= 0 and abs(video_time - self._last_video_time) < 0.1:
+                self._stall_count += 1
+                if self._stall_count >= self._STALL_THRESHOLD:
+                    self._signal_stream_ended("video_stalled")
+                    return
+            else:
+                self._stall_count = 0  # Reset — video is progressing
+        self._last_video_time = video_time
+
+    def _signal_stream_ended(self, reason):
+        """Emit stream_ended signal once and stop monitoring."""
+        if self._stream_end_detected:
+            return
+        self._stream_end_detected = True
+        self._health_timer.stop()
+        self.stream_ended.emit(self.username, reason)
+
+    # --- Background Mode (Performance Optimization) ---
+
+    def set_background_mode(self, is_background):
+        """Reduce resource usage when tab is in background, restore when focused.
+
+        Background: hides video rendering via CSS (audio keeps playing),
+        pauses CSS animations/transitions, and sets WebView2 to low memory mode.
+        Foreground: removes all background optimizations seamlessly.
+
+        IMPORTANT: This does NOT affect the liking mechanism.
+        The _do_like JS spoofs visibility and dispatches key/click events on 'document',
+        which works regardless of video element CSS visibility.
+        """
+        if is_background == self._is_background:
+            return
+        self._is_background = is_background
+
+        if is_background:
+            js = """
+            (function() {
+                if (document.getElementById('__autoliker_bg_mode__')) return;
+                var style = document.createElement('style');
+                style.id = '__autoliker_bg_mode__';
+                style.textContent = [
+                    'video { visibility: hidden !important; height: 1px !important; width: 1px !important; position: absolute !important; }',
+                    '*, *::before, *::after { animation-play-state: paused !important; transition: none !important; }'
+                ].join('\\n');
+                document.head.appendChild(style);
+            })();
+            """
+            self.webview.evaluate_js(js)
+            # Set WebView2 low memory mode
+            if self._core_wv2:
+                try:
+                    self._core_wv2.MemoryUsageTargetLevel = 1  # Low
+                except Exception:
+                    pass
+        else:
+            js = """
+            (function() {
+                var style = document.getElementById('__autoliker_bg_mode__');
+                if (style) style.remove();
+            })();
+            """
+            self.webview.evaluate_js(js)
+            # Restore WebView2 normal memory mode
+            if self._core_wv2:
+                try:
+                    self._core_wv2.MemoryUsageTargetLevel = 0  # Normal
+                except Exception:
+                    pass
+
+    # --- DOM Cleanup (Memory Optimization) ---
+
+    def _run_dom_cleanup(self):
+        """Periodically trim chat messages and remove gift overlay animations to prevent DOM bloat."""
+        js = """
+        (function() {
+            // Limit chat messages to last 100
+            var chatContainers = document.querySelectorAll(
+                '[data-e2e="chat-list"], [class*="ChatList"], [class*="chat-list"], [class*="chatroom"]'
+            );
+            chatContainers.forEach(function(container) {
+                var items = container.children;
+                if (items.length > 100) {
+                    var toRemove = items.length - 100;
+                    for (var i = 0; i < toRemove; i++) {
+                        if (items[0]) items[0].remove();
+                    }
+                }
+            });
+
+            // Remove completed gift overlay animations
+            var gifts = document.querySelectorAll(
+                '[class*="gift" i], [class*="Gift"], [data-e2e*="gift"]'
+            );
+            gifts.forEach(function(g) {
+                // Only remove if it's an overlay/animation, not a core UI element
+                if (g.closest('[data-e2e="chat-list"]')) return;
+                g.remove();
+            });
+        })();
+        """
+        self.webview.evaluate_js(js)
+
     def cleanup(self):
         self.like_timer.stop()
         if hasattr(self, 'mute_timer'):
             self.mute_timer.stop()
+        if hasattr(self, '_health_timer'):
+            self._health_timer.stop()
+        if hasattr(self, '_cleanup_timer'):
+            self._cleanup_timer.stop()
         self.webview.load_url("about:blank")
         self.webview.deleteLater()
         
@@ -585,6 +840,7 @@ class TikTokAutoLikerApp(QMainWindow):
             tapper_enabled = self.favorites.get(username, True)
             is_muted = self.settings.setdefault("muted_users", {}).get(username, True)
             tab = LiveTab(username, self.settings, tapper_enabled, is_muted)
+            tab.stream_ended.connect(self._on_stream_ended_in_tab)
             
             prefix = "❤️ " if tapper_enabled else ""
             idx = self.tabs.addTab(tab, f"{prefix}LIVE: @{username}")
@@ -624,6 +880,7 @@ class TikTokAutoLikerApp(QMainWindow):
                 # Heart turned ON and user is already confirmed live — open tab immediately
                 is_muted = self.settings.setdefault("muted_users", {}).get(username, True)
                 tab = LiveTab(username, self.settings, tapper_enabled=True, is_muted=is_muted)
+                tab.stream_ended.connect(self._on_stream_ended_in_tab)
                 idx = self.tabs.addTab(tab, f"❤️ LIVE: @{username}")
                 self.tabs.setCurrentIndex(idx)
                 self.active_streams[username] = tab
@@ -650,6 +907,7 @@ class TikTokAutoLikerApp(QMainWindow):
                 pixmap.save(os.path.join("avatars", f"{username}.png"))
                 if username in self.fav_widgets:
                     self.fav_widgets[username].set_avatar(pixmap)
+                    self.fav_widgets[username].has_avatar = True
         reply.deleteLater()
 
     def _get_zero_widget(self):
@@ -939,6 +1197,46 @@ class TikTokAutoLikerApp(QMainWindow):
         settings_container_layout.addWidget(settings_box)
         left_layout.addWidget(settings_container)
         
+        # --- Data Management ---
+        data_container = QWidget()
+        data_layout = QHBoxLayout(data_container)
+        data_layout.setContentsMargins(0, 0, 0, 0)
+        data_layout.setSpacing(10)
+
+        btn_style = """
+            QPushButton {
+                background-color: #2a2a2a;
+                color: #777;
+                border: 1px solid #333;
+                border-radius: 4px;
+                padding: 4px 8px;
+                font-weight: normal;
+                font-size: 10px;
+            }
+            QPushButton:hover {
+                background-color: #333;
+                color: #aaa;
+            }
+            QPushButton:pressed {
+                background-color: #222;
+            }
+        """
+        
+        self.backup_btn = QPushButton("Backup Data")
+        self.backup_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.backup_btn.setStyleSheet(btn_style)
+        self.backup_btn.clicked.connect(self.backup_data)
+
+        self.restore_btn = QPushButton("Restore Data")
+        self.restore_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.restore_btn.setStyleSheet(btn_style)
+        self.restore_btn.clicked.connect(self.restore_data)
+
+        data_layout.addWidget(self.backup_btn)
+        data_layout.addWidget(self.restore_btn)
+        
+        left_layout.addWidget(data_container)
+        
         # Update Banner (hidden by default, shown if a newer version is detected on GitHub)
         self.update_banner = QFrame()
         self.update_banner.setObjectName("update_banner")
@@ -1000,6 +1298,7 @@ class TikTokAutoLikerApp(QMainWindow):
         self.tabs.setTabsClosable(True)
         self.tabs.tabCloseRequested.connect(self.close_tab)
         self.tabs.tabBar().setCursor(Qt.CursorShape.PointingHandCursor)
+        self.tabs.currentChanged.connect(self._on_tab_changed)
         
         corner_widget = QWidget()
         corner_layout = QHBoxLayout(corner_widget)
@@ -1194,12 +1493,12 @@ class TikTokAutoLikerApp(QMainWindow):
         if self.explore_webview is None:
             current = self.tabs.currentWidget()
             self.explore_webview = QtWebView2Widget(
-                url="https://www.tiktok.com/",
                 lazyload=True,
                 user_data_folder="./userdata",
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0",
                 init_settings_hook=self._on_explore_core_init
             )
+            self._explore_loaded = False  # Deferred: URL loaded only when user clicks the tab
             self.tabs.insertTab(0, self.explore_webview, "Explore TikTok")
             self.tabs.tabBar().setTabButton(0, self.tabs.tabBar().ButtonPosition.RightSide, self._get_zero_widget())
             if current:
@@ -1345,6 +1644,7 @@ class TikTokAutoLikerApp(QMainWindow):
             self.active_streams[username].deleteLater()
             del self.active_streams[username]
             self._update_waiting_tab()
+            self._fallback_tab_selection()
         
         self.checker.queue = [u for u in self.checker.queue if u != username]
 
@@ -1359,6 +1659,43 @@ class TikTokAutoLikerApp(QMainWindow):
     def reset_settings_to_default(self):
         self.delay_slider.setValue(50)
         self.rand_slider.setValue(50)
+
+    def backup_data(self):
+        file_path, _ = QFileDialog.getSaveFileName(self, "Save Backup", "", "Zip Files (*.zip)")
+        if file_path:
+            import tempfile
+            with tempfile.TemporaryDirectory() as temp_dir:
+                if os.path.exists(SETTINGS_FILE):
+                    shutil.copy2(SETTINGS_FILE, temp_dir)
+                if os.path.exists(FAVORITES_FILE):
+                    shutil.copy2(FAVORITES_FILE, temp_dir)
+                if os.path.exists("avatars"):
+                    shutil.copytree("avatars", os.path.join(temp_dir, "avatars"))
+                
+                base_name = file_path[:-4] if file_path.lower().endswith('.zip') else file_path
+                shutil.make_archive(base_name, 'zip', temp_dir)
+                
+            QMessageBox.information(self, "Backup Successful", f"Data backed up to {file_path}")
+
+    def restore_data(self):
+        file_path, _ = QFileDialog.getOpenFileName(self, "Select Backup", "", "Zip Files (*.zip)")
+        if file_path:
+            reply = QMessageBox.question(self, "Restore Data", "This will overwrite your current favorites and settings. Continue?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            if reply == QMessageBox.StandardButton.Yes:
+                import tempfile
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    shutil.unpack_archive(file_path, temp_dir)
+                    
+                    if os.path.exists(os.path.join(temp_dir, SETTINGS_FILE)):
+                        shutil.copy2(os.path.join(temp_dir, SETTINGS_FILE), SETTINGS_FILE)
+                    if os.path.exists(os.path.join(temp_dir, FAVORITES_FILE)):
+                        shutil.copy2(os.path.join(temp_dir, FAVORITES_FILE), FAVORITES_FILE)
+                    if os.path.exists(os.path.join(temp_dir, "avatars")):
+                        if os.path.exists("avatars"):
+                            shutil.rmtree("avatars")
+                        shutil.copytree(os.path.join(temp_dir, "avatars"), "avatars")
+                        
+                QMessageBox.information(self, "Restore Successful", "Data restored. Please restart the app for changes to fully take effect.")
 
     def check_for_updates(self, manual=False):
         """Asynchronously query GitHub Releases API for new version."""
@@ -1544,6 +1881,7 @@ class TikTokAutoLikerApp(QMainWindow):
             if username not in self.active_streams and tapper_enabled:
                 is_muted = self.settings.setdefault("muted_users", {}).get(username, True)
                 tab = LiveTab(username, self.settings, tapper_enabled, is_muted)
+                tab.stream_ended.connect(self._on_stream_ended_in_tab)
 
                 prefix = "❤️ " if tapper_enabled else ""
                 idx = self.tabs.addTab(tab, f"{prefix}LIVE: @{username}")
@@ -1552,6 +1890,12 @@ class TikTokAutoLikerApp(QMainWindow):
                 self.active_streams[username] = tab
                 self._update_waiting_tab()
         else:
+            # Download avatar even from offline profile page (new: profile-page avatar extraction)
+            if avatar_url and username in self.fav_widgets:
+                if not self.fav_widgets[username].has_avatar and getattr(self.fav_widgets[username], 'current_avatar_url', None) != avatar_url:
+                    self.fav_widgets[username].current_avatar_url = avatar_url
+                    self._download_avatar(username, avatar_url)
+
             # Increment consecutive offline counter
             self.consecutive_offline[username] = self.consecutive_offline.get(username, 0) + 1
 
@@ -1570,6 +1914,7 @@ class TikTokAutoLikerApp(QMainWindow):
                     self.active_streams[username].deleteLater()
                     del self.active_streams[username]
                     self._update_waiting_tab()
+                    self._fallback_tab_selection()
 
         # When all results are in, switch to the summary label
         if total > 0 and getattr(self, '_completed_checks', 0) >= total:
@@ -1597,6 +1942,81 @@ class TikTokAutoLikerApp(QMainWindow):
         widget.cleanup()
         widget.deleteLater()
         self._update_waiting_tab()
+        self._fallback_tab_selection()
+
+    def _fallback_tab_selection(self):
+        """Select the best fallback tab: prefer another live stream, then System Idle.
+        
+        NEVER auto-select the Explore TikTok tab — it should only be opened manually by the user.
+        """
+        current = self.tabs.currentWidget()
+        # If current tab is already a live stream or the idle tab, no action needed
+        if isinstance(current, LiveTab):
+            return
+        if current == self.waiting_webview:
+            return
+        
+        # If we're on the Explore tab (or any other non-stream tab), switch away
+        # Prefer an active stream tab first
+        if self.active_streams:
+            first_tab = next(iter(self.active_streams.values()))
+            idx = self.tabs.indexOf(first_tab)
+            if idx != -1:
+                self.tabs.setCurrentIndex(idx)
+                return
+        
+        # Fall back to System Idle tab
+        if self.waiting_webview:
+            idx = self.tabs.indexOf(self.waiting_webview)
+            if idx != -1:
+                self.tabs.setCurrentIndex(idx)
+                return
+
+    def _on_tab_changed(self, index):
+        """Manage background/foreground mode for LiveTab performance optimization.
+        
+        When a LiveTab becomes the active (focused) tab, restore full rendering.
+        All other LiveTabs are put into background mode to save resources.
+        Also triggers deferred loading of the Explore tab on first click.
+        """
+        current_widget = self.tabs.widget(index)
+        
+        # Deferred Explore tab loading: load URL only when user manually selects it
+        if current_widget == self.explore_webview and not getattr(self, '_explore_loaded', False):
+            self._explore_loaded = True
+            self.explore_webview.load_url("https://www.tiktok.com/")
+        
+        # Toggle background mode on all LiveTabs
+        for username, tab in self.active_streams.items():
+            tab.set_background_mode(tab != current_widget)
+
+    def _on_stream_ended_in_tab(self, username, reason):
+        """Handle stream_ended signal from a LiveTab's in-tab health monitor.
+        
+        Closes the tab, marks user offline, and selects a fallback tab.
+        """
+        if username not in self.active_streams:
+            return
+        
+        self.status_label.setText(f"● Stream ended for @{username} ({reason})")
+        
+        # Mark as offline
+        if hasattr(self, 'known_live'):
+            self.known_live.discard(username)
+        if username in self.fav_widgets:
+            self.fav_widgets[username].set_status(False)
+        self._sort_list()
+        
+        # Close the tab
+        tab = self.active_streams[username]
+        tab_idx = self.tabs.indexOf(tab)
+        if tab_idx != -1:
+            self.tabs.removeTab(tab_idx)
+        tab.cleanup()
+        tab.deleteLater()
+        del self.active_streams[username]
+        self._update_waiting_tab()
+        self._fallback_tab_selection()
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
