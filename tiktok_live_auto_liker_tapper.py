@@ -25,7 +25,7 @@ def _qt_message_handler(mode, context, message):
     if "setPointSize" in message or "Point size" in message:
         return
 
-APP_VERSION = "v1.0.4"
+APP_VERSION = "v1.0.5"
 GITHUB_REPO = "Crypto90/TikTok-Live-Auto-Liker-Tapper"
 
 FAVORITES_FILE = "favorites.json"
