@@ -25,7 +25,7 @@ def _qt_message_handler(mode, context, message):
     if "setPointSize" in message or "Point size" in message:
         return
 
-APP_VERSION = "v1.0.3"
+APP_VERSION = "v1.0.4"
 GITHUB_REPO = "Crypto90/TikTok-Live-Auto-Liker-Tapper"
 
 FAVORITES_FILE = "favorites.json"
@@ -250,8 +250,7 @@ class CheckerWorker(QObject):
         super().__init__(parent)
         self.webview = QtWebView2Widget(
             lazyload=False,
-            user_data_folder="./userdata",
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0"
+            user_data_folder="./userdata"
         )
         self.webview._init_settings_hook = self._on_core_init
         self.current_user = None
@@ -446,7 +445,8 @@ class LiveTab(QWidget):
             url=f"https://www.tiktok.com/@{self.username}/live",
             lazyload=False,
             user_data_folder="./userdata",
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0",
+            debug_enabled=True,
+            context_menus_enabled=True,
             init_settings_hook=self._on_live_core_init
         )
         layout.addWidget(self.webview)
@@ -526,12 +526,6 @@ class LiveTab(QWidget):
         # is still present and events dispatch normally.
         js_code = f"""
         (function() {{
-            // Spoof visibility so TikTok thinks the background tab is active
-            if (document.visibilityState !== 'visible') {{
-                Object.defineProperty(document, 'visibilityState', {{value: 'visible', writable: false}});
-                Object.defineProperty(document, 'hidden', {{value: false, writable: false}});
-            }}
-            
             function triggerTap() {{
                 // Dispatch 'L' key with proper bubbling
                 var keydown = new KeyboardEvent('keydown', {{key: 'l', code: 'KeyL', keyCode: 76, which: 76, bubbles: true, cancelable: true}});
@@ -667,8 +661,7 @@ class LiveTab(QWidget):
                 var style = document.createElement('style');
                 style.id = '__autoliker_bg_mode__';
                 style.textContent = [
-                    'video { visibility: hidden !important; height: 1px !important; width: 1px !important; position: absolute !important; }',
-                    '*, *::before, *::after { animation-play-state: paused !important; transition: none !important; }'
+                    'video { visibility: hidden !important; height: 1px !important; width: 1px !important; position: absolute !important; }'
                 ].join('\\n');
                 document.head.appendChild(style);
             })();
@@ -695,38 +688,10 @@ class LiveTab(QWidget):
                 except Exception:
                     pass
 
-    # --- DOM Cleanup (Memory Optimization) ---
-
     def _run_dom_cleanup(self):
-        """Periodically trim chat messages and remove gift overlay animations to prevent DOM bloat."""
-        js = """
-        (function() {
-            // Limit chat messages to last 100
-            var chatContainers = document.querySelectorAll(
-                '[data-e2e="chat-list"], [class*="ChatList"], [class*="chat-list"], [class*="chatroom"]'
-            );
-            chatContainers.forEach(function(container) {
-                var items = container.children;
-                if (items.length > 100) {
-                    var toRemove = items.length - 100;
-                    for (var i = 0; i < toRemove; i++) {
-                        if (items[0]) items[0].remove();
-                    }
-                }
-            });
-
-            // Remove completed gift overlay animations
-            var gifts = document.querySelectorAll(
-                '[class*="gift" i], [class*="Gift"], [data-e2e*="gift"]'
-            );
-            gifts.forEach(function(g) {
-                // Only remove if it's an overlay/animation, not a core UI element
-                if (g.closest('[data-e2e="chat-list"]')) return;
-                g.remove();
-            });
-        })();
-        """
-        self.webview.evaluate_js(js)
+        """No-op. TikTok's native chat virtualization handles memory well enough.
+        Manual DOM manipulation crashes TikTok's React front-end."""
+        pass
 
     def cleanup(self):
         self.like_timer.stop()
@@ -1354,6 +1319,30 @@ class TikTokAutoLikerApp(QMainWindow):
         """)
         refresh_btn.clicked.connect(self.refresh_current_tab)
 
+        debug_btn = QPushButton("Debug")
+        debug_btn.setToolTip("Open Developer Tools for Active Tab")
+        debug_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        debug_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #333333;
+                color: #FFFFFF;
+                border: 1px solid #444444;
+                border-radius: 6px;
+                padding: 5px 10px;
+                font-weight: bold;
+                font-size: 8.5pt;
+                margin: 4px 2px;
+            }
+            QPushButton:hover {
+                background-color: #444444;
+            }
+            QPushButton:pressed {
+                background-color: #222222;
+            }
+        """)
+        debug_btn.clicked.connect(self.open_debug_console)
+
+        corner_layout.addWidget(debug_btn)
         corner_layout.addWidget(refresh_btn)
         corner_layout.addWidget(self.signout_btn)
         self.tabs.setCornerWidget(corner_widget, Qt.Corner.TopRightCorner)
@@ -1365,7 +1354,6 @@ class TikTokAutoLikerApp(QMainWindow):
         self.waiting_webview = QtWebView2Widget(
             lazyload=False,
             user_data_folder="./userdata",
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0",
             init_settings_hook=self._on_waiting_core_init
         )
         self.waiting_webview.load_html(WAITING_HTML)
@@ -1381,7 +1369,6 @@ class TikTokAutoLikerApp(QMainWindow):
             url="https://www.tiktok.com/login",
             lazyload=False,
             user_data_folder="./userdata",
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0",
             init_settings_hook=self._on_login_core_init
         )
         QTimer.singleShot(4500, self._reveal_login_tab)
@@ -1495,7 +1482,6 @@ class TikTokAutoLikerApp(QMainWindow):
             self.explore_webview = QtWebView2Widget(
                 lazyload=True,
                 user_data_folder="./userdata",
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0",
                 init_settings_hook=self._on_explore_core_init
             )
             self._explore_loaded = False  # Deferred: URL loaded only when user clicks the tab
@@ -1546,6 +1532,34 @@ class TikTokAutoLikerApp(QMainWindow):
         elif hasattr(current_widget, 'webview') and hasattr(current_widget.webview, 'reload'):
             current_widget.webview.reload()
 
+    def open_debug_console(self):
+        current_widget = self.tabs.currentWidget()
+        core = None
+        
+        # 1. Check if the current widget is a LiveTab with a saved core
+        if hasattr(current_widget, '_core_wv2'):
+            core = current_widget._core_wv2
+            
+        # 2. Check if the current widget has a .webview attribute (LiveTab, etc)
+        elif hasattr(current_widget, 'webview') and hasattr(current_widget.webview, '_webview'):
+            try:
+                core = current_widget.webview._webview.CoreWebView2
+            except Exception:
+                pass
+                
+        # 3. Check if the current widget IS a QtWebView2Widget (Login, Explore, Waiting)
+        elif hasattr(current_widget, '_webview'):
+            try:
+                core = current_widget._webview.CoreWebView2
+            except Exception:
+                pass
+                
+        if core:
+            try:
+                core.OpenDevToolsWindow()
+            except Exception as e:
+                print(f"Error opening DevTools: {e}")
+
     def sign_out(self):
         msg_box = QMessageBox(self)
         msg_box.setWindowTitle("Sign Out")
@@ -1591,7 +1605,6 @@ class TikTokAutoLikerApp(QMainWindow):
             url="https://www.tiktok.com/logout",
             lazyload=False,
             user_data_folder="./userdata",
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0",
             init_settings_hook=self._on_login_core_init
         )
         
