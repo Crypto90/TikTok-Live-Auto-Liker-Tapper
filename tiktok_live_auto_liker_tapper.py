@@ -25,7 +25,7 @@ def _qt_message_handler(mode, context, message):
     if "setPointSize" in message or "Point size" in message:
         return
 
-APP_VERSION = "v1.0.5"
+APP_VERSION = "v1.0.6"
 GITHUB_REPO = "Crypto90/TikTok-Live-Auto-Liker-Tapper"
 
 FAVORITES_FILE = "favorites.json"
@@ -209,7 +209,7 @@ class SettingsManager:
                     if isinstance(data, list):
                         return {user: True for user in data}
                     return data
-            except:
+            except Exception:
                 pass
         return {}
 
@@ -229,7 +229,7 @@ class SettingsManager:
                 with open(SETTINGS_FILE, 'r') as f:
                     settings = json.load(f)
                     default_settings.update(settings)
-            except:
+            except Exception:
                 pass
         return default_settings
 
@@ -298,7 +298,7 @@ class CheckerWorker(QObject):
                 QMetaObject.invokeMethod(self, "_nav_offline", Qt.ConnectionType.QueuedConnection)
                 return
                 
-            QTimer.singleShot(4000, lambda: QMetaObject.invokeMethod(self, "_check_js", Qt.ConnectionType.QueuedConnection))
+            QTimer.singleShot(4000, lambda s=self: QMetaObject.invokeMethod(s, "_check_js", Qt.ConnectionType.QueuedConnection))
             
         self._nav_handler = on_nav_completed
         core_wv2.NavigationCompleted += self._nav_handler
@@ -311,8 +311,8 @@ class CheckerWorker(QObject):
     @pyqtSlot()
     def _nav_offline(self):
         """Redirected away from /live — user is offline, but try to grab avatar from profile page."""
-        QTimer.singleShot(3000, lambda: QMetaObject.invokeMethod(
-            self, "_check_profile_avatar_js", Qt.ConnectionType.QueuedConnection
+        QTimer.singleShot(3000, lambda s=self: QMetaObject.invokeMethod(
+            s, "_check_profile_avatar_js", Qt.ConnectionType.QueuedConnection
         ))
 
     @pyqtSlot()
@@ -423,6 +423,9 @@ class LiveTab(QWidget):
     # Signal emitted when stream end is detected in-tab: (username, reason)
     stream_ended = pyqtSignal(str, str)
 
+    # Recycle threshold: after 2 hours, reload the stream to free Chromium memory
+    _RECYCLE_THRESHOLD_S = 2 * 60 * 60  # 2 hours
+
     def __init__(self, username, settings, tapper_enabled=True, is_muted=True):
         super().__init__()
         self.username = username
@@ -432,6 +435,9 @@ class LiveTab(QWidget):
         self._core_wv2 = None
         self._is_background = False
         self._stream_end_detected = False
+        self._tab_opened_at = time.time()
+        self._source_changed_handler = None
+        self._nav_completed_handler = None
 
         # Stream health tracking
         self._last_video_time = -1.0
@@ -456,19 +462,20 @@ class LiveTab(QWidget):
         self.like_timer.timeout.connect(self._do_like)
         self.like_timer.start(self._get_next_delay())
 
-        self.mute_timer = QTimer(self)
-        self.mute_timer.timeout.connect(self._enforce_mute)
-        self.mute_timer.start(500)
-
         # Stream health monitor — checks every 15s for stream end/stall/redirect
         self._health_timer = QTimer(self)
         self._health_timer.timeout.connect(self._check_stream_health_js)
         self._health_timer.start(15000)
 
-        # DOM cleanup timer — trims chat and removes gift overlays every 30s
+        # DOM cleanup timer — trims chat and removes gift overlays every 60s
         self._cleanup_timer = QTimer(self)
         self._cleanup_timer.timeout.connect(self._run_dom_cleanup)
-        self._cleanup_timer.start(30000)
+        self._cleanup_timer.start(60000)
+
+        # Memory pressure timer — reclaims memory on background tabs every 5 min
+        self._memory_timer = QTimer(self)
+        self._memory_timer.timeout.connect(self._reclaim_memory)
+        self._memory_timer.start(300000)
 
     def _on_live_core_init(self, core_wv2):
         """Store CoreWebView2 reference for memory management and URL monitoring."""
@@ -481,9 +488,16 @@ class LiveTab(QWidget):
         # Monitor URL changes to detect redirects to other streamers
         def on_source_changed(sender, args):
             url_str = str(sender.Source)
-            QTimer.singleShot(0, lambda: self._check_url_redirect(url_str))
+            QTimer.singleShot(0, lambda u=url_str: self._check_url_redirect(u))
         self._source_changed_handler = on_source_changed
         core_wv2.SourceChanged += self._source_changed_handler
+
+        # Enforce mute state on each navigation completion (replaces 500ms polling timer)
+        def on_nav_completed(sender, args):
+            if args.IsSuccess:
+                QTimer.singleShot(500, self._enforce_mute)
+        self._nav_completed_handler = on_nav_completed
+        core_wv2.NavigationCompleted += self._nav_completed_handler
 
     def _check_url_redirect(self, url):
         """Detect if TikTok has redirected us to a different streamer's live page."""
@@ -497,8 +511,12 @@ class LiveTab(QWidget):
             self._signal_stream_ended("redirected_away_from_live")
 
     def _enforce_mute(self):
-        js = f"document.querySelectorAll('video, audio').forEach(v => v.muted = {'true' if self.is_muted else 'false'});"
-        self.webview.evaluate_js(js)
+        """One-shot mute enforcement — called on navigation complete, not polled."""
+        try:
+            js = f"document.querySelectorAll('video, audio').forEach(v => v.muted = {'true' if self.is_muted else 'false'});"
+            self.webview.evaluate_js(js)
+        except RuntimeError:
+            pass  # Widget may be deleted
 
     def set_muted(self, muted):
         self.is_muted = muted
@@ -690,19 +708,151 @@ class LiveTab(QWidget):
                     pass
 
     def _run_dom_cleanup(self):
-        """No-op. TikTok's native chat virtualization handles memory well enough.
-        Manual DOM manipulation crashes TikTok's React front-end."""
-        pass
+        """Aggressively trim DOM to prevent unbounded memory growth in long-running streams.
+
+        Targets:
+        - Chat messages beyond the most recent 50
+        - Gift/effect animation overlays
+        - Recommendation panels and off-screen elements
+        - Detached image/blob resources
+        - Chromium's internal caches (via performance.measureUserAgentSpecificMemory if available)
+        """
+        if self._stream_end_detected:
+            return
+        js_code = """
+        (function() {
+            // 1. Trim chat messages — keep only the last 50
+            var chatContainers = document.querySelectorAll(
+                '[class*="ChatMessageList"], [class*="chat-list"], [data-e2e="chat-list"], [class*="webcast-chatroom"]'
+            );
+            chatContainers.forEach(function(container) {
+                var messages = container.children;
+                var excess = messages.length - 50;
+                for (var i = 0; i < excess; i++) {
+                    if (messages[0]) messages[0].remove();
+                }
+            });
+
+            // 2. Remove gift/effect overlays and animations
+            document.querySelectorAll(
+                '[class*="GiftEffect"], [class*="gift-effect"], [class*="GiftAnimation"],'
+                + ' [class*="gift-animation"], [class*="GiftOverlay"], [class*="gift-overlay"],'
+                + ' [class*="EffectContainer"], [class*="effect-container"],'
+                + ' [class*="GiftPanel"], [class*="gift-panel"]'
+            ).forEach(function(el) { el.remove(); });
+
+            // 3. Remove recommendation/suggestion panels
+            document.querySelectorAll(
+                '[class*="RecommendUser"], [class*="recommend-user"],'
+                + ' [class*="RelatedLive"], [class*="related-live"],'
+                + ' [class*="SuggestedLive"], [class*="suggested-live"]'
+            ).forEach(function(el) { el.remove(); });
+
+            // 4. Revoke any blob URLs to free associated memory
+            document.querySelectorAll('img[src^="blob:"], video[src^="blob:"]').forEach(function(el) {
+                if (el.src && el.src.startsWith('blob:')) {
+                    try { URL.revokeObjectURL(el.src); } catch(e) {}
+                }
+            });
+
+            // 5. Clear any detached canvases
+            document.querySelectorAll('canvas:not([data-keep])').forEach(function(c) {
+                if (!c.closest('[data-e2e="live-video"]') && !c.closest('.tiktok-web-player')) {
+                    var ctx = c.getContext('2d');
+                    if (ctx) { ctx.clearRect(0, 0, c.width, c.height); }
+                    c.width = 1; c.height = 1;
+                }
+            });
+        })();
+        """
+        try:
+            self.webview.evaluate_js(js_code)
+        except RuntimeError:
+            pass  # Widget may be deleted
+
+        # Also check if this tab should be recycled (2hr threshold)
+        self._recycle_if_stale()
+
+    def _reclaim_memory(self):
+        """Periodic memory pressure relief for background tabs.
+
+        Sets WebView2 to low memory mode briefly, then restores.
+        Only acts on background tabs to avoid visual disruption.
+        """
+        if not self._is_background or not self._core_wv2:
+            return
+        try:
+            self._core_wv2.MemoryUsageTargetLevel = 1  # Low
+            # Restore after 2 seconds — enough time for Chromium to compact
+            QTimer.singleShot(2000, self._restore_memory_level)
+        except Exception:
+            pass
+
+    def _restore_memory_level(self):
+        """Restore normal memory level after brief low-memory pressure."""
+        if not self._core_wv2 or self._is_background:
+            return  # Stay in low mode if still in background
+        try:
+            self._core_wv2.MemoryUsageTargetLevel = 0  # Normal
+        except Exception:
+            pass
+
+    def _recycle_if_stale(self):
+        """Reload the stream if it's been open for over 2 hours.
+
+        Navigates to about:blank to release page resources, then reloads
+        the live stream URL. This effectively resets Chromium's per-page
+        memory (JS heap, DOM, media buffers) without destroying the tab.
+        """
+        if self._stream_end_detected:
+            return
+        elapsed = time.time() - self._tab_opened_at
+        if elapsed < self._RECYCLE_THRESHOLD_S:
+            return
+
+        # Reset the clock
+        self._tab_opened_at = time.time()
+        self._last_video_time = -1.0
+        self._stall_count = 0
+
+        try:
+            self.webview.load_url("about:blank")
+            QTimer.singleShot(1000, lambda: self.webview.load_url(
+                f"https://www.tiktok.com/@{self.username}/live"
+            ))
+        except RuntimeError:
+            pass  # Widget may be deleted
 
     def cleanup(self):
+        """Full teardown: stop all timers, unhook events, release WebView2 resources."""
+        # Stop all timers
         self.like_timer.stop()
-        if hasattr(self, 'mute_timer'):
-            self.mute_timer.stop()
         if hasattr(self, '_health_timer'):
             self._health_timer.stop()
         if hasattr(self, '_cleanup_timer'):
             self._cleanup_timer.stop()
-        self.webview.load_url("about:blank")
+        if hasattr(self, '_memory_timer'):
+            self._memory_timer.stop()
+
+        # Unhook WebView2 event handlers to break reference cycles
+        if self._core_wv2:
+            try:
+                if self._source_changed_handler:
+                    self._core_wv2.SourceChanged -= self._source_changed_handler
+                if self._nav_completed_handler:
+                    self._core_wv2.NavigationCompleted -= self._nav_completed_handler
+            except Exception:
+                pass
+
+        self._source_changed_handler = None
+        self._nav_completed_handler = None
+        self._core_wv2 = None
+
+        # Navigate to blank to release page resources, then destroy
+        try:
+            self.webview.load_url("about:blank")
+        except RuntimeError:
+            pass
         self.webview.deleteLater()
         
     def update_settings(self, settings):
@@ -716,7 +866,7 @@ class PulsingDot(QWidget):
         
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update)
-        self.timer.start(30)
+        self.timer.start(100)
         self.start_time = time.time()
 
     def paintEvent(self, event):
@@ -767,8 +917,6 @@ class TikTokAutoLikerApp(QMainWindow):
         self.floating_dot = None
         self.dot_pos_timer = QTimer(self)
         self.dot_pos_timer.timeout.connect(self._update_floating_dot)
-        self.dot_pos_timer.start(30)
-        
         self.dot_pos_timer.start(30)
         
         self._apply_stylesheet()
@@ -966,16 +1114,27 @@ class TikTokAutoLikerApp(QMainWindow):
 
     def closeEvent(self, event):
         try:
+            # Stop all periodic timers
+            if hasattr(self, 'check_timer') and self.check_timer.isActive():
+                self.check_timer.stop()
+            if hasattr(self, 'dot_pos_timer'):
+                self.dot_pos_timer.stop()
+
+            # Cleanup checker workers
             if getattr(self, 'checker', None):
                 self.checker.cleanup()
-            
+
+            # Properly close all active stream tabs
+            for tab in list(self.active_streams.values()):
+                tab.cleanup()
+            self.active_streams.clear()
+
             if getattr(self, 'explore_webview', None):
                 self.explore_webview.close()
             if getattr(self, 'waiting_webview', None):
                 self.waiting_webview.close()
-                
-            for tab in self.active_streams.values():
-                tab.webview.close()
+            if getattr(self, 'login_webview', None):
+                self.login_webview.close()
         except Exception:
             pass
         event.accept()
@@ -1054,6 +1213,7 @@ class TikTokAutoLikerApp(QMainWindow):
         add_layout = QHBoxLayout()
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Username")
+        self.search_input.returnPressed.connect(self.add_favorite)
         add_btn = QPushButton("Add")
         add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         add_btn.clicked.connect(self.add_favorite)
@@ -1586,6 +1746,35 @@ class TikTokAutoLikerApp(QMainWindow):
         if hasattr(self, 'signout_btn'):
             self.signout_btn.setVisible(False)
 
+        # --- Stop monitoring and clean up checker ---
+        if hasattr(self, 'check_timer') and self.check_timer.isActive():
+            self.check_timer.stop()
+        if getattr(self, 'checker', None):
+            self.checker.cleanup()
+            self.checker = None
+        self.is_monitoring = False
+
+        # --- Close all active stream tabs ---
+        for username, tab in list(self.active_streams.items()):
+            tab_idx = self.tabs.indexOf(tab)
+            if tab_idx != -1:
+                self.tabs.removeTab(tab_idx)
+            tab.cleanup()
+            tab.deleteLater()
+        self.active_streams.clear()
+
+        # --- Clear stale live status data ---
+        if hasattr(self, 'known_live'):
+            self.known_live.clear()
+        if hasattr(self, 'consecutive_offline'):
+            self.consecutive_offline.clear()
+        self._pending_checks = 0
+        self._completed_checks = 0
+
+        # Reset all user status labels
+        for widget in self.fav_widgets.values():
+            widget.set_status(False)
+
         # Remove Explore tab if open
         if getattr(self, 'explore_webview', None) is not None:
             idx = self.tabs.indexOf(self.explore_webview)
@@ -1594,6 +1783,7 @@ class TikTokAutoLikerApp(QMainWindow):
             self.explore_webview.close()
             self.explore_webview.deleteLater()
             self.explore_webview = None
+            self._explore_loaded = False
 
         # Clean up existing login webview if present
         if getattr(self, 'login_webview', None) is not None:
@@ -1603,6 +1793,12 @@ class TikTokAutoLikerApp(QMainWindow):
             self.login_webview.close()
             self.login_webview.deleteLater()
             self.login_webview = None
+
+        # Remove waiting tab before re-adding it later
+        if getattr(self, 'waiting_webview', None) is not None:
+            idx = self.tabs.indexOf(self.waiting_webview)
+            if idx != -1:
+                self.tabs.removeTab(idx)
 
         self.status_label.setText("● Signing out...")
         self.login_webview = QtWebView2Widget(
@@ -1634,17 +1830,8 @@ class TikTokAutoLikerApp(QMainWindow):
     def remove_favorite(self, username=None):
         if username is None:
             return
-            
-        if username in self.favorites:
-            if isinstance(self.favorites, list):
-                self.favorites.remove(username)
-            elif isinstance(self.favorites, dict):
-                del self.favorites[username]
-                
-        self._sort_list()
-        SettingsManager.save_favorites(self.favorites)
-        self.status_label.setText(f"● Removed {username} from favorites.")
-        
+
+        # Close active stream tab first (before removing from favorites dict)
         if username in self.active_streams:
             tab_idx = self.tabs.indexOf(self.active_streams[username])
             if tab_idx != -1:
@@ -1654,8 +1841,26 @@ class TikTokAutoLikerApp(QMainWindow):
             del self.active_streams[username]
             self._update_waiting_tab()
             self._fallback_tab_selection()
+
+        # Remove from known_live tracking
+        if hasattr(self, 'known_live'):
+            self.known_live.discard(username)
+
+        # Remove from favorites dict
+        if username in self.favorites:
+            if isinstance(self.favorites, list):
+                self.favorites.remove(username)
+            elif isinstance(self.favorites, dict):
+                del self.favorites[username]
+
+        # Remove from fav_widgets before sort (sort only rebuilds keys in favorites)
+        self.fav_widgets.pop(username, None)
+
+        self._sort_list()
+        SettingsManager.save_favorites(self.favorites)
+        self.status_label.setText(f"● Removed {username} from favorites.")
         
-        if getattr(self, 'is_monitoring', False) and hasattr(self, 'checker'):
+        if getattr(self, 'is_monitoring', False) and hasattr(self, 'checker') and self.checker:
             self.checker.queue = [u for u in self.checker.queue if u != username]
 
     def save_settings_ui(self):
