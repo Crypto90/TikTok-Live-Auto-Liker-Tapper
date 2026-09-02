@@ -38,12 +38,14 @@ python build.py
 
 ### 🍎 macOS
 - **Requirements**: Xcode Command Line Tools (`xcode-select --install`)
-- **Output**: `dist/TikTokLiveAutoLiker.app`
-- **Create Distributable Zip**:
+- **Output**: `dist/TikTokLiveAutoLiker.app` + `dist/Open_TikTokLiveAutoLiker.command`
+- **Gatekeeper / First Launch**: Because the app is ad-hoc signed (no Apple Developer ID), macOS Gatekeeper will quarantine it when downloaded from the internet. The build automatically generates `Open_TikTokLiveAutoLiker.command` — users double-click this on first launch to strip the quarantine attribute. Subsequent launches of the `.app` work normally.
+- **Create Distributable Zip** (always include both files):
   ```bash
   cd dist
-  zip -r -y TikTokLiveAutoLiker-macOS.zip TikTokLiveAutoLiker.app
+  zip -r -y TikTokLiveAutoLiker-macOS.zip TikTokLiveAutoLiker.app Open_TikTokLiveAutoLiker.command
   ```
+- **Manual Gatekeeper bypass** (alternative for users): `xattr -cr /path/to/TikTokLiveAutoLiker.app`
 
 ### 🪟 Windows
 - **Requirements**: Microsoft Edge WebView2 Runtime (installed by default on Windows 10/11)
@@ -96,3 +98,11 @@ git tag vX.Y.Z ───► git push origin --tags
    git push origin main --tags
    ```
 5. All three platform assets (`.exe`, `.zip`, `.tar.gz`) will be compiled in parallel and automatically published to GitHub Releases.
+
+### Hotfix / Asset Replacement (without bumping version):
+If you need to replace a single release asset (e.g., re-upload just the macOS zip with a fix):
+1. Build locally: `python3 build.py`
+2. Create the zip: `cd dist && zip -r -y TikTokLiveAutoLiker-macOS.zip TikTokLiveAutoLiker.app Open_TikTokLiveAutoLiker.command`
+3. Delete the old asset and upload the new one via GitHub API or the Releases web UI.
+   - GitHub API delete: `DELETE /repos/{owner}/{repo}/releases/assets/{asset_id}`
+   - GitHub API upload: `POST https://uploads.github.com/repos/{owner}/{repo}/releases/{release_id}/assets?name=TikTokLiveAutoLiker-macOS.zip`

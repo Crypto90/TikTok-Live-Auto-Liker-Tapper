@@ -149,7 +149,7 @@ python build.py
 
 | Host OS | Build Command | Output File(s) | How to Archive |
 | :--- | :--- | :--- | :--- |
-| **macOS** | `python3 build.py` | `dist/TikTokLiveAutoLiker.app` | `cd dist && zip -r -y TikTokLiveAutoLiker-macOS.zip TikTokLiveAutoLiker.app` |
+| **macOS** | `python3 build.py` | `dist/TikTokLiveAutoLiker.app` + `dist/Open_TikTokLiveAutoLiker.command` | `cd dist && zip -r -y TikTokLiveAutoLiker-macOS.zip TikTokLiveAutoLiker.app Open_TikTokLiveAutoLiker.command` |
 | **Windows** | `python build.py` | `dist\TikTokLiveAutoLiker.exe` | Ready as standalone `.exe` (or zip) |
 | **Linux** | `python3 build.py` | `dist/TikTokLiveAutoLiker` | `cd dist && tar -czf TikTokLiveAutoLiker-Linux.tar.gz TikTokLiveAutoLiker` |
 
@@ -237,3 +237,16 @@ When releasing a new version (e.g., `vX.Y.Z`):
 ### 🚨 Gotcha 6: Vector Icons vs. System Emoji Fonts
 - **Symptom**: Heart icons or buttons appear tiny (7px wide) or misaligned on macOS/Linux compared to Windows.
 - **Rule**: Do NOT rely on system fonts for core UI action icons (like the heart toggle). Use `make_heart_icon(size, color)` which draws vector paths using `QPainterPath` and locks button sizes with `setFixedSize(28, 28)`.
+
+### 🚨 Gotcha 7: macOS Gatekeeper Quarantine on Downloaded Binaries
+- **Symptom**: After downloading and unzipping the macOS release, macOS shows *"TikTokLiveAutoLiker.app can't be opened because Apple cannot check it for malicious software"* or similar. User must click "Allow" twice in System Settings → Privacy & Security.
+- **Root Cause**: macOS tags all files downloaded from the internet with the `com.apple.quarantine` extended attribute. Because the app is only **ad-hoc signed** (no paid Apple Developer ID), Gatekeeper rejects it on first open.
+- **Build-level fix** (already applied in `build.py`):
+  1. `--osx-bundle-identifier=com.crypto90.tiktokliveautoliker` gives the bundle a proper `CFBundleIdentifier`.
+  2. `codesign --force --deep --sign -` re-seals all nested Qt frameworks after PyInstaller packs them.
+  3. `Open_TikTokLiveAutoLiker.command` launcher is auto-generated and included in the zip — it runs `xattr -cr` to strip quarantine before opening the app.
+- **Rule**: ALWAYS include `Open_TikTokLiveAutoLiker.command` in the macOS zip. The zip command is:
+  ```bash
+  zip -r -y TikTokLiveAutoLiker-macOS.zip TikTokLiveAutoLiker.app Open_TikTokLiveAutoLiker.command
+  ```
+- **User workaround** (if they don't use the launcher): `xattr -cr /path/to/TikTokLiveAutoLiker.app` in Terminal.

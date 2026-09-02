@@ -85,12 +85,15 @@ python build.py
 ```
 
 ### Platform Output:
-- **macOS**: Produces a standalone Application bundle with native high-res icon:
-  `dist/TikTokLiveAutoLiker.app`
+- **macOS**: Produces a standalone Application bundle with native high-res icon and a Gatekeeper bypass launcher:
+  - `dist/TikTokLiveAutoLiker.app`
+  - `dist/Open_TikTokLiveAutoLiker.command` ← **double-click this on first launch** to bypass Gatekeeper
 - **Linux**: Produces a standalone Linux binary:
   `dist/TikTokLiveAutoLiker`
 - **Windows**: Produces a standalone Windows executable:
   `dist/TikTokLiveAutoLiker.exe`
+
+> **macOS users**: On first launch, use **`Open_TikTokLiveAutoLiker.command`** instead of the `.app` directly. This strips the macOS quarantine flag and opens the app. Subsequent launches of the `.app` will work normally.
 
 ---
 
