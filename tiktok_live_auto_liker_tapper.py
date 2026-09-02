@@ -28,7 +28,7 @@ def _qt_message_handler(mode, context, message):
         return
 
 
-APP_VERSION = "v1.0.7"
+APP_VERSION = "v1.0.8"
 GITHUB_REPO = "Crypto90/TikTok-Live-Auto-Liker-Tapper"
 
 
@@ -1458,7 +1458,16 @@ class TikTokAutoLikerApp(QMainWindow):
 
         self.tabs.blockSignals(True)
         try:
-            # Setup Explore tab BEFORE removing login tab so tabs is never empty
+            # 1. First remove and cleanup login tab
+            if self.login_webview is not None:
+                idx = self.tabs.indexOf(self.login_webview)
+                if idx != -1:
+                    self.tabs.removeTab(idx)
+                self.login_webview.cleanup()
+                self.login_webview.deleteLater()
+                self.login_webview = None
+
+            # 2. Setup Explore tab at index 0
             if self.explore_webview is None:
                 self.explore_webview = UniversalWebView(
                     parent=self,
@@ -1471,15 +1480,8 @@ class TikTokAutoLikerApp(QMainWindow):
                 self.tabs.insertTab(0, self.explore_webview, "Explore TikTok")
                 self._remove_tab_close_button(0)
 
+            # 3. Ensure waiting tab is added now that login tab is gone
             self._update_waiting_tab()
-
-            if self.login_webview is not None:
-                idx = self.tabs.indexOf(self.login_webview)
-                if idx != -1:
-                    self.tabs.removeTab(idx)
-                self.login_webview.cleanup()
-                self.login_webview.deleteLater()
-                self.login_webview = None
         finally:
             self.tabs.blockSignals(False)
 
