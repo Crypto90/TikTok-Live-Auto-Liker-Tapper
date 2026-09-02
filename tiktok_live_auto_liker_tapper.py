@@ -1963,11 +1963,16 @@ class TikTokAutoLikerApp(QMainWindow):
 
     def _fallback_tab_selection(self):
         current = self.tabs.currentWidget()
+
+        # Already on a live stream — nothing to do.
         if isinstance(current, LiveTab):
             return
+
+        # Already on the idle tab — nothing to do.
         if current == self.waiting_webview:
             return
 
+        # If there are live streams, prefer the first one.
         if self.active_streams:
             first_tab = next(iter(self.active_streams.values()))
             idx = self.tabs.indexOf(first_tab)
@@ -1975,6 +1980,9 @@ class TikTokAutoLikerApp(QMainWindow):
                 self.tabs.setCurrentIndex(idx)
                 return
 
+        # No live streams — always land on the System Idle tab (never the Explore tab).
+        # This prevents explore_webview from auto-loading and autoplaying when the last
+        # streamer goes offline.
         if self.waiting_webview:
             idx = self.tabs.indexOf(self.waiting_webview)
             if idx != -1:
@@ -1991,6 +1999,17 @@ class TikTokAutoLikerApp(QMainWindow):
         is_explore = (self.explore_webview is not None and current_widget == self.explore_webview)
 
         if is_explore:
+            # Guard: if there are no active streams and the waiting tab is present, this is a
+            # transient state caused by Qt's automatic tab selection during removeTab().
+            # _fallback_tab_selection() will redirect to the idle tab momentarily —
+            # don't load or unmute the explore tab now to avoid autoplay / audio leaks.
+            waiting_in_bar = (
+                getattr(self, 'waiting_webview', None) is not None
+                and self.tabs.indexOf(self.waiting_webview) != -1
+            )
+            if not self.active_streams and waiting_in_bar:
+                return
+
             if not getattr(self, '_explore_loaded', False):
                 self._explore_loaded = True
                 self.explore_webview.load_url("https://www.tiktok.com/")
