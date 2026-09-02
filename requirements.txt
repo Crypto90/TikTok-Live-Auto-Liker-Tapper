@@ -1,0 +1,15 @@
+# Core GUI Framework
+PyQt6>=6.5.0
+
+# Cross-Platform Fallback & Linux Browser Engine
+PyQt6-WebEngine>=6.5.0
+
+# macOS Native WebKit Engine (Hardware H.264/HEVC/AAC, low RAM)
+pyobjc-framework-WebKit>=10.0; sys_platform == 'darwin'
+pyobjc-framework-Cocoa>=10.0; sys_platform == 'darwin'
+
+# Windows Native Edge WebView2 Engine
+qtwebview2>=0.1.0; sys_platform == 'win32'
+
+# Standalone Executable Packaging
+pyinstaller>=6.0.0
