@@ -54,6 +54,7 @@ def build_macos():
         "--windowed",
         "--clean",
         f"--name={APP_NAME}",
+        f"--osx-bundle-identifier=com.crypto90.{APP_NAME.lower()}",
         "--add-data=icon.png:.",
         "--add-data=webview_engine.py:.",
     ]
@@ -65,7 +66,22 @@ def build_macos():
 
     cmd.append(MAIN_SCRIPT)
     run_cmd(cmd)
+
+    # Apply deep ad-hoc codesignature to properly seal all nested frameworks
+    print("Applying deep ad-hoc signature to bundle...")
+    subprocess.run(["codesign", "--force", "--deep", "--sign", "-", f"dist/{APP_NAME}.app"], check=False)
+
+    # Generate 1-click launcher helper script to bypass Gatekeeper quarantine
+    launcher_path = f"dist/Open_{APP_NAME}.command"
+    with open(launcher_path, "w") as f:
+        f.write('#!/bin/bash\n')
+        f.write('DIR="$(cd "$(dirname "$0")" && pwd)"\n')
+        f.write(f'xattr -cr "$DIR/{APP_NAME}.app" 2>/dev/null\n')
+        f.write(f'open "$DIR/{APP_NAME}.app"\n')
+    os.chmod(launcher_path, 0o755)
+
     print(f"\n[SUCCESS] macOS app built: dist/{APP_NAME}.app")
+    print(f"[SUCCESS] Launcher helper created: {launcher_path}")
 
 
 def build_linux():

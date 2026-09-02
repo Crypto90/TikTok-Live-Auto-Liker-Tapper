@@ -56,7 +56,7 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           cd dist
-          zip -r -y TikTokLiveAutoLiker-macOS.zip TikTokLiveAutoLiker.app
+          zip -r -y TikTokLiveAutoLiker-macOS.zip TikTokLiveAutoLiker.app Open_TikTokLiveAutoLiker.command
 
       - name: Package Linux Binary into Tarball
         if: runner.os == 'Linux'
