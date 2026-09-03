@@ -497,7 +497,14 @@ if HAS_WIN_WEBVIEW2:
 
         def evaluate_js(self, js_code, callback=None):
             if self.wv2:
-                self.wv2.evaluate_js(js_code, callback)
+                clean_js = js_code.strip()
+                # qtwebview2 wraps script in `const result = await (async () => { {script} })();`
+                # An arrow function with curly braces requires an explicit `return` to emit a value.
+                if callback and not clean_js.startswith("return "):
+                    while clean_js.endswith(";"):
+                        clean_js = clean_js[:-1].strip()
+                    clean_js = f"return ({clean_js});"
+                self.wv2.evaluate_js(clean_js, callback)
 
         def set_muted(self, muted):
             self._is_muted = muted

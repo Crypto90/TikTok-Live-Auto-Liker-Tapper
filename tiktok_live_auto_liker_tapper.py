@@ -382,7 +382,9 @@ class CheckerWorker(QObject):
             self._finish(False, "", is_error=True)
             return
 
-        if "/live" not in url and f"@{self.current_user}" in url:
+        current_lower = str(self.current_user or "").lower()
+        url_lower = str(url or "").lower()
+        if "/live" not in url_lower and f"@{current_lower}" in url_lower:
             QTimer.singleShot(2500, lambda s=self: QMetaObject.invokeMethod(
                 s, "_check_profile_avatar_js", Qt.ConnectionType.QueuedConnection
             ))
@@ -420,13 +422,17 @@ class CheckerWorker(QObject):
         if self._done:
             return
         js_code = """(function() {
+            var isLiveUrl = window.location.href.indexOf('/live') !== -1;
             var video = document.querySelector('video') !== null || 
                         document.querySelector('[data-e2e="live-video"]') !== null ||
                         document.querySelector('.tiktok-web-player') !== null;
-            var img = document.querySelector('img[class*="Avatar"], img[class*="avatar"]');
+            var img = document.querySelector('img[data-e2e="user-avatar"]') ||
+                      document.querySelector('img[class*="Avatar"], img[class*="avatar"]');
             var avatar = img ? img.src : '';
-            var ended = /live.has.ended|stream.ended|broadcast.ended|replay/i.test(document.body ? document.body.innerText : '');
-            return { is_live: video && !ended, avatar_url: avatar };
+            var endOverlay = document.querySelector('[data-e2e="live-end-card"], [data-e2e="live-end-follow"]') !== null;
+            var bodyText = document.body ? document.body.innerText : '';
+            var ended = endOverlay || /live.has.ended|stream.ended|broadcast.ended|replay|ist zu ende|ha terminado|a pris fin|è terminat/i.test(bodyText);
+            return { is_live: isLiveUrl && video && !ended, avatar_url: avatar };
         })();"""
         self.webview.evaluate_js(js_code, self._on_js_result)
 
@@ -599,7 +605,7 @@ class LiveTab(QWidget):
             signals.video_ready_state = video ? video.readyState : 0;
 
             var body_text = document.body ? document.body.innerText : '';
-            signals.has_ended_text = /live.has.ended|stream.ended|broadcast.ended|replay|this live has ended|host.has.ended/i.test(body_text);
+            signals.has_ended_text = /live.has.ended|stream.ended|broadcast.ended|replay|this live has ended|host.has.ended|ist zu ende|ha terminado|a pris fin|è terminat/i.test(body_text);
             signals.has_follow_overlay = !!document.querySelector('[data-e2e="live-end-follow"], [data-e2e="live-end-card"]');
             signals.current_url = window.location.href;
             return signals;
@@ -1885,6 +1891,8 @@ class TikTokAutoLikerApp(QMainWindow):
             return
 
         if is_error:
+            if username in self.fav_widgets and username not in getattr(self, 'known_live', set()):
+                self.fav_widgets[username].set_status(False)
             return
 
         if not hasattr(self, 'known_live'):
@@ -1922,21 +1930,28 @@ class TikTokAutoLikerApp(QMainWindow):
 
             self.consecutive_offline[username] = self.consecutive_offline.get(username, 0) + 1
 
-            if self.consecutive_offline[username] >= 2:
-                self.known_live.discard(username)
+            # Require 2 consecutive clean offline checks only if creator was actively streaming or known live
+            if username in self.known_live or username in self.active_streams:
+                if self.consecutive_offline[username] >= 2:
+                    self.known_live.discard(username)
+                    if username in self.fav_widgets:
+                        self.fav_widgets[username].set_status(False)
+                    self._sort_list()
+
+                    if username in self.active_streams:
+                        tab_idx = self.tabs.indexOf(self.active_streams[username])
+                        if tab_idx != -1:
+                            self.tabs.removeTab(tab_idx)
+                        self.active_streams[username].cleanup()
+                        self.active_streams[username].deleteLater()
+                        del self.active_streams[username]
+                        self._update_waiting_tab()
+                        self._fallback_tab_selection()
+            else:
+                # If creator was not live, immediately update UI from "Checking..." to "Offline"
                 if username in self.fav_widgets:
                     self.fav_widgets[username].set_status(False)
                 self._sort_list()
-
-                if username in self.active_streams:
-                    tab_idx = self.tabs.indexOf(self.active_streams[username])
-                    if tab_idx != -1:
-                        self.tabs.removeTab(tab_idx)
-                    self.active_streams[username].cleanup()
-                    self.active_streams[username].deleteLater()
-                    del self.active_streams[username]
-                    self._update_waiting_tab()
-                    self._fallback_tab_selection()
 
     def close_tab(self, index):
         widget = self.tabs.widget(index)

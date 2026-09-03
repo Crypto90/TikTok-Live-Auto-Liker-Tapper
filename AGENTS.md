@@ -210,11 +210,15 @@ When releasing a new version (e.g., `vX.Y.Z`):
 
 ## 5. Critical Architecture Rules & Gotchas
 
-### 🚨 Gotcha 1: WebKit JavaScript Top-Level `return` Exception
-- **Symptom**: Online streamers falsely show as "Offline"; avatar checks return `None`.
-- **Root Cause**: In WebKit (`evaluateJavaScript_completionHandler_`), scripts execute as top-level program text. Writing `return (function() { ... })();` causes a fatal `SyntaxError: Return statements are only valid inside functions.`.
-- **Rule**: NEVER include a top-level `return` statement in strings passed to `evaluate_js`. Always use standard self-executing expressions: `(function() { return { ... }; })()`.
-- **Safeguard**: Both `MacWKWebViewWidget.evaluate_js` and `QtWebEngineWidget.evaluate_js` automatically strip leading `return ` prefixes.
+### 🚨 Gotcha 1: WebKit vs. WebView2 JavaScript `return` Compatibility
+- **Symptom**: Online streamers falsely show as "Offline"; avatar or stream health checks return `None`.
+- **Root Cause**:
+  - In Apple WebKit (`evaluateJavaScript_completionHandler_`) and QtWebEngine (`runJavaScript`), scripts execute as top-level program text in global scope. Passing `return (function() { ... })();` throws a fatal `SyntaxError: Return statements are only valid inside functions.`.
+  - Conversely, in Windows Microsoft Edge WebView2 (`qtwebview2`), scripts are wrapped in an async arrow function block: `const result = await (async () => { {script} })();`. In JavaScript, block bodies `{ ... }` evaluate to `undefined` unless there is an explicit top-level `return` statement.
+- **Rule**: Pass standard self-executing expressions without leading `return `: `(function() { return { ... }; })()`.
+- **Safeguards (Handled Automatically in `webview_engine.py`)**:
+  - `MacWKWebViewWidget.evaluate_js` and `QtWebEngineWidget.evaluate_js` automatically strip leading `return ` prefixes.
+  - `WindowsWebView2Widget.evaluate_js` automatically wraps expressions with `return ({clean_js});` when a callback is provided and no `return ` prefix is present.
 
 ### 🚨 Gotcha 2: Qt Tab Signal Blocking & Reordering
 - **Symptom**: Spurious `currentChanged` signals trigger during setup, causing background tabs to start loading or audio to leak.
