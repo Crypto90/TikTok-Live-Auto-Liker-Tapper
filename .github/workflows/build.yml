@@ -93,7 +93,7 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          name: "v1.0.9 - Hotfix: Fix Explore Tab Autoplay on Stream End"
+          name: "v1.1.0 - Fix Windows Live Checks & Stuck Checking Status"
           body_path: RELEASE_NOTES.md
           files: |
             release_assets/TikTokLiveAutoLiker.exe

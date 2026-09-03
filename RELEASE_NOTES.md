@@ -1,13 +1,16 @@
-# 🚀 TikTok Live Auto Liker v1.0.9
+# 🚀 TikTok Live Auto Liker v1.1.0
 
-A hotfix release addressing an audio autoplay regression where switching away from the last live stream would land on the Explore tab and start autoplaying TikTok videos with sound.
+A critical stability and cross-platform compatibility release resolving false offline detections on Windows, eliminating the stuck "Checking..." UI status on first check run, and hardening live detection across all platforms.
 
-## 🐛 Bug Fixes
+## 🐛 Bug Fixes & Improvements
 
-- **Fixed Explore Tab Autoplay on Stream End**: When the last monitored streamer went offline (or their tab was closed), Qt's internal `removeTab()` would momentarily select the Explore tab before the idle tab redirect could run — causing TikTok videos to load and play audio in the background. Two-layer fix applied:
-  - `_on_tab_changed`: Now detects the transient state (no active streams + idle tab is present) and skips loading/unmuting the Explore tab entirely.
-  - `_fallback_tab_selection`: Clarified intent of each branch with comments to prevent future regressions.
-- **Fixed macOS Gatekeeper Blocking (v1.0.8 hotfix included)**: The macOS app bundle now ships with a proper `CFBundleIdentifier`, a deep ad-hoc codesignature, and an `Open_TikTokLiveAutoLiker.command` launcher script. Double-clicking the launcher on first run strips the quarantine attribute automatically — no more "can't be opened because Apple cannot check it for malicious software" dialog.
+- **Fixed False Offline Detection on Windows**: Microsoft Edge WebView2 (`qtwebview2`) wraps JavaScript evaluations in an async arrow function block body `(async () => { {script} })()`, which evaluated to `undefined` without a top-level `return` statement. `WindowsWebView2Widget.evaluate_js` now automatically wraps expressions in `return ({clean_js});`, properly passing detection dictionaries, avatar URLs, and stream health metrics to the app on Windows.
+- **Fixed Stuck "Checking..." Status on First Run**: Previously, `consecutive_offline >= 2` flap protection was applied indiscriminately to all users, causing non-live favorites to stay stuck displaying `"Checking..."` for the entire first 60 seconds until the second run triggered. This flap protection is now scoped strictly to creators who were actively streaming or known live; non-live creators immediately update to `"Offline"` on the first check.
+- **Error Guarding for UI Status**: Network or timeout check failures (`is_error=True`) now properly transition new or non-live favorites away from `"Checking..."` so the list remains clean and accurate.
+- **Hardened Live Stream & Avatar Detection**:
+  - `CheckerWorker._check_js` now verifies that the active URL is on `/live`, uses a multi-selector query for creator avatars (`img[data-e2e="user-avatar"], img[class*="Avatar"], img[class*="avatar"]`), and checks language-independent end overlay elements (`[data-e2e="live-end-card"], [data-e2e="live-end-follow"]`) plus multilingual end text indicators.
+  - Redirect checks in `_on_nav_completed` are now case-insensitive.
+  - Multilingual ended-stream indicators were also added to `LiveTab._check_stream_health_js`.
 
 ## 📦 Downloads
 
@@ -23,4 +26,4 @@ Simply download the archive or executable for your platform and replace your pre
 
 ## 💖 Support
 
-[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/K3K314GUP?ref=tiktok_live_auto_liker_release_109)
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/K3K314GUP?ref=tiktok_live_auto_liker_release_110)
