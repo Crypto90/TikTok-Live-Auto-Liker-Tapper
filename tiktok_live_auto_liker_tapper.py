@@ -17,7 +17,7 @@ from PyQt6.QtWidgets import (
     QLabel, QLineEdit, QPushButton, QListWidget, QSpinBox, QSlider,
     QTabWidget, QTabBar, QSplitter, QGroupBox, QFormLayout, QMessageBox, QListWidgetItem, QFrame, QFileDialog, QToolButton,
     QDialog, QComboBox, QCheckBox, QRadioButton, QButtonGroup, QStackedWidget,
-    QTableWidget, QTableWidgetItem, QHeaderView
+    QTableWidget, QTableWidgetItem, QHeaderView, QGridLayout
 )
 from PyQt6.QtCore import Qt, QUrl, QTimer, pyqtSignal, QObject, pyqtSlot, QMetaObject, qInstallMessageHandler, QStandardPaths, QSize, QRect
 from PyQt6.QtGui import QPainter, QColor, QIcon, QPixmap, QPainterPath, QDesktopServices, QFont
@@ -1902,35 +1902,35 @@ class TikTokAutoLikerApp(QMainWindow):
 
         # --- Data Management ---
         data_container = QWidget()
-        data_layout = QHBoxLayout(data_container)
+        data_layout = QGridLayout(data_container)
         data_layout.setContentsMargins(0, 0, 0, 0)
-        data_layout.setSpacing(10)
+        data_layout.setSpacing(6)
 
         btn_style = """
             QPushButton {
                 background-color: #2a2a2a;
-                color: #777;
-                border: 1px solid #333;
-                border-radius: 4px;
-                padding: 4px 8px;
-                font-weight: normal;
-                font-size: 10px;
+                color: #8c96a8;
+                border: 1px solid #364057;
+                border-radius: 5px;
+                padding: 5px 8px;
+                font-weight: 500;
+                font-size: 11px;
             }
             QPushButton:hover {
-                background-color: #333;
-                color: #aaa;
+                background-color: #364057;
+                color: #ffffff;
             }
             QPushButton:pressed {
                 background-color: #222;
             }
         """
 
-        self.backup_btn = QPushButton("Backup Data")
+        self.backup_btn = QPushButton("💾 Backup")
         self.backup_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.backup_btn.setStyleSheet(btn_style)
         self.backup_btn.clicked.connect(self.backup_data)
 
-        self.restore_btn = QPushButton("Restore Data")
+        self.restore_btn = QPushButton("📂 Restore")
         self.restore_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.restore_btn.setStyleSheet(btn_style)
         self.restore_btn.clicked.connect(self.restore_data)
@@ -1945,10 +1945,10 @@ class TikTokAutoLikerApp(QMainWindow):
         self.analytics_btn.setStyleSheet(btn_style)
         self.analytics_btn.clicked.connect(self.open_analytics_dialog)
 
-        data_layout.addWidget(self.backup_btn)
-        data_layout.addWidget(self.restore_btn)
-        data_layout.addWidget(self.cloud_sync_btn)
-        data_layout.addWidget(self.analytics_btn)
+        data_layout.addWidget(self.backup_btn, 0, 0)
+        data_layout.addWidget(self.restore_btn, 0, 1)
+        data_layout.addWidget(self.cloud_sync_btn, 1, 0)
+        data_layout.addWidget(self.analytics_btn, 1, 1)
         left_layout.addWidget(data_container)
 
         # Update Banner

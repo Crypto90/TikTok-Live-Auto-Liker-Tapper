@@ -1260,8 +1260,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                 document.getElementById('statUptime').textContent = formatUptime(data.uptime || 0);
 
                 if (data.sync_status) {
-                    document.getElementById('syncText').textContent = data.sync_status;
-                    document.getElementById('syncDetailText').textContent = data.sync_status;
+                    const st = document.getElementById('syncText');
+                    if (st) st.textContent = data.sync_status;
+                    const sdt = document.getElementById('syncDetailText');
+                    if (sdt) sdt.textContent = data.sync_status;
                 }
 
                 activeStreams = data.active_streams || [];
