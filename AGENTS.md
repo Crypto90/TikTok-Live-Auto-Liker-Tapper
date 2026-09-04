@@ -178,10 +178,21 @@ The repository uses `.github/workflows/build.yml` with a decoupled 2-stage archi
 ### Step-by-Step Version Bump & Release Procedure
 
 #### ⚠️ Version Numbering Rule (MANDATORY)
-- **Always perform a strictly sequential PATCH bump** (`Z` in `vX.Y.Z`):
-  - Example: `v1.1.0` ➔ `v1.1.1` ➔ `v1.1.2` ➔ `v1.1.3`
-- **NEVER** increment the minor (`Y`) or major (`X`) version number on your own, even for massive new features or architectural rewrites! Only bump minor or major if the user explicitly specifies a specific version number.
-- Always check the latest existing git tag using `git tag -l` and increment the patch number by exactly 1.
+- **Strictly Sequential Patch Increments**:
+  - Always bump the patch number (`Z` in `vX.Y.Z`) by exactly 1:
+    - Example: `v1.1.0` ➔ `v1.1.1` ➔ `v1.1.2` ➔ `v1.1.3`
+- **Single-Digit Rollover Rule (NO Double Digits like `.10`)**:
+  - Patch numbers must stay strictly single-digit (`0` through `9`).
+  - When the patch version reaches `9` (e.g. `v1.1.9`), the next increment **MUST roll over to the next minor version at `.0`**:
+    - **CORRECT**: `v1.1.9` ➔ `v1.2.0`
+    - **FORBIDDEN**: `v1.1.10`, `v1.1.11`, etc. (NEVER create double-digit patch numbers!).
+  - Similarly, when the minor version reaches `9` (e.g. `v1.9.9`), the next increment rolls over to the next major version:
+    - **CORRECT**: `v1.9.9` ➔ `v2.0.0`
+    - **FORBIDDEN**: `v1.10.0`
+- **No Manual Minor/Major Bumps**:
+  - Do not bump minor (`Y`) or major (`X`) ahead of time unless rolling over from `.9` or unless the user explicitly specifies an exact version number.
+- **Check Existing Tags**:
+  - Always check existing tags via `git tag -l` and apply the rollover rule from the highest tag.
 
 #### Two-Step Release Workflow:
 1. **Commit Feature & Code Changes First**:
