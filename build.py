@@ -57,6 +57,9 @@ def build_macos():
         f"--osx-bundle-identifier=com.crypto90.{APP_NAME.lower()}",
         "--add-data=icon.png:.",
         "--add-data=webview_engine.py:.",
+        "--add-data=sync_manager.py:.",
+        "--add-data=web_server.py:.",
+        "--add-data=headless_runner.py:.",
     ]
 
     if os.path.exists("icon.icns"):
@@ -94,6 +97,9 @@ def build_linux():
         f"--name={APP_NAME}",
         "--add-data=icon.png:.",
         "--add-data=webview_engine.py:.",
+        "--add-data=sync_manager.py:.",
+        "--add-data=web_server.py:.",
+        "--add-data=headless_runner.py:.",
     ]
 
     if os.path.exists("icon.png"):
@@ -114,6 +120,9 @@ def build_windows():
         f"--name={APP_NAME}",
         "--add-data=icon.png;.",
         "--add-data=webview_engine.py;.",
+        "--add-data=sync_manager.py;.",
+        "--add-data=web_server.py;.",
+        "--add-data=headless_runner.py;.",
     ]
 
     # Include qtwebview2 libs if available

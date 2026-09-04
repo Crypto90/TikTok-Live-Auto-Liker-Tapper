@@ -14,13 +14,15 @@ import time
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QListWidget, QSpinBox, QSlider,
-    QTabWidget, QTabBar, QSplitter, QGroupBox, QFormLayout, QMessageBox, QListWidgetItem, QFrame, QFileDialog, QToolButton
+    QTabWidget, QTabBar, QSplitter, QGroupBox, QFormLayout, QMessageBox, QListWidgetItem, QFrame, QFileDialog, QToolButton,
+    QDialog, QComboBox, QCheckBox, QRadioButton, QButtonGroup, QStackedWidget
 )
 from PyQt6.QtCore import Qt, QUrl, QTimer, pyqtSignal, QObject, pyqtSlot, QMetaObject, qInstallMessageHandler, QStandardPaths, QSize, QRect
 from PyQt6.QtGui import QPainter, QColor, QIcon, QPixmap, QPainterPath, QDesktopServices, QFont
 from PyQt6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
 
 from webview_engine import UniversalWebView, get_best_engine_class
+from sync_manager import SyncManager, FolderSyncBackend, WebDAVSyncBackend, RestSyncBackend
 
 
 def _qt_message_handler(mode, context, message):
@@ -28,7 +30,7 @@ def _qt_message_handler(mode, context, message):
         return
 
 
-APP_VERSION = "v1.1.0"
+APP_VERSION = "v1.1.1"
 GITHUB_REPO = "Crypto90/TikTok-Live-Auto-Liker-Tapper"
 
 
@@ -768,6 +770,299 @@ class PulsingTabBar(QTabBar):
             p.end()
 
 
+class SyncSettingsDialog(QDialog):
+    def __init__(self, parent=None, sync_manager=None, settings=None):
+        super().__init__(parent)
+        self.sync_manager = sync_manager
+        self.settings = settings or {}
+        self.setWindowTitle("Cloud & Multi-Device Sync")
+        self.setFixedSize(540, 560)
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #16181f;
+                color: #e0e0e0;
+            }
+            QGroupBox {
+                border: 1px solid #282e3d;
+                border-radius: 8px;
+                margin-top: 12px;
+                padding-top: 14px;
+                font-weight: bold;
+                color: #ffffff;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 4px;
+                color: #25F4EE;
+            }
+            QLineEdit, QComboBox {
+                background-color: #1f2533;
+                border: 1px solid #2d3648;
+                border-radius: 6px;
+                padding: 6px 10px;
+                color: #ffffff;
+                font-size: 9pt;
+            }
+            QLineEdit:focus, QComboBox:focus {
+                border: 1px solid #FE2C55;
+            }
+            QPushButton {
+                background-color: #252c3c;
+                color: #ffffff;
+                border: 1px solid #364057;
+                border-radius: 6px;
+                padding: 6px 12px;
+                font-weight: 600;
+                font-size: 8.5pt;
+            }
+            QPushButton:hover {
+                background-color: #2f384d;
+                border-color: #455370;
+            }
+            QPushButton#primaryBtn {
+                background-color: #FE2C55;
+                color: #ffffff;
+                border: none;
+            }
+            QPushButton#primaryBtn:hover {
+                background-color: #e01740;
+            }
+            QRadioButton, QCheckBox {
+                color: #e0e0e0;
+                font-size: 9pt;
+            }
+            QRadioButton::indicator:checked, QCheckBox::indicator:checked {
+                background-color: #FE2C55;
+                border: 1px solid #FE2C55;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+        layout.setContentsMargins(18, 18, 18, 18)
+
+        header_lbl = QLabel("Multi-Device Synchronization")
+        header_lbl.setStyleSheet("font-size: 13pt; font-weight: bold; color: #ffffff;")
+        sub_lbl = QLabel("Keep favorites, settings, and tapper toggles in sync across all your PCs and Linux servers.")
+        sub_lbl.setStyleSheet("font-size: 8.5pt; color: #8c96a8;")
+        sub_lbl.setWordWrap(True)
+        layout.addWidget(header_lbl)
+        layout.addWidget(sub_lbl)
+
+        sync_cfg = self.settings.setdefault("sync", {})
+
+        self.enable_cb = QCheckBox("Enable Automatic Cloud Sync")
+        self.enable_cb.setChecked(bool(sync_cfg.get("enabled", False)))
+        self.enable_cb.setStyleSheet("font-weight: bold; font-size: 9.5pt; color: #25F4EE;")
+        layout.addWidget(self.enable_cb)
+
+        method_box = QGroupBox("Sync Method")
+        method_layout = QVBoxLayout(method_box)
+        method_layout.setSpacing(8)
+
+        self.btn_group = QButtonGroup(self)
+        self.rb_folder = QRadioButton("📁 Shared Folder / Cloud Drive (Dropbox, OneDrive, Syncthing, LAN)")
+        self.rb_webdav = QRadioButton("🌐 WebDAV Remote Server (Nextcloud, ownCloud, Fastmail)")
+        self.rb_rest = QRadioButton("⚡ REST API Server (Self-hosted sync_server.py or Cloud)")
+
+        self.btn_group.addButton(self.rb_folder, 1)
+        self.btn_group.addButton(self.rb_webdav, 2)
+        self.btn_group.addButton(self.rb_rest, 3)
+
+        method = sync_cfg.get("method", "folder")
+        if method == "webdav":
+            self.rb_webdav.setChecked(True)
+        elif method == "rest":
+            self.rb_rest.setChecked(True)
+        else:
+            self.rb_folder.setChecked(True)
+
+        method_layout.addWidget(self.rb_folder)
+        method_layout.addWidget(self.rb_webdav)
+        method_layout.addWidget(self.rb_rest)
+        layout.addWidget(method_box)
+
+        self.stack = QStackedWidget()
+
+        # 1. Folder page
+        folder_page = QWidget()
+        f_layout = QVBoxLayout(folder_page)
+        f_layout.setContentsMargins(0, 4, 0, 0)
+        f_layout.setSpacing(6)
+        f_lbl = QLabel("Shared Directory Path:")
+        f_lbl.setStyleSheet("font-size: 8.5pt; color: #aaa;")
+        f_row = QHBoxLayout()
+        self.folder_edit = QLineEdit(sync_cfg.get("folder_path", ""))
+        self.folder_edit.setPlaceholderText("Select folder in Dropbox, OneDrive, Syncthing, or SMB share")
+        browse_btn = QPushButton("Browse...")
+        browse_btn.clicked.connect(self._browse_folder)
+        f_row.addWidget(self.folder_edit)
+        f_row.addWidget(browse_btn)
+        f_hint = QLabel("💡 Tip: Selecting a folder in Dropbox, OneDrive, or Syncthing keeps all PCs in sync with zero setup!")
+        f_hint.setStyleSheet("font-size: 7.5pt; color: #667; font-style: italic;")
+        f_hint.setWordWrap(True)
+        f_layout.addWidget(f_lbl)
+        f_layout.addLayout(f_row)
+        f_layout.addWidget(f_hint)
+        f_layout.addStretch()
+        self.stack.addWidget(folder_page)
+
+        # 2. WebDAV page
+        webdav_page = QWidget()
+        w_layout = QFormLayout(webdav_page)
+        w_layout.setContentsMargins(0, 4, 0, 0)
+        w_layout.setSpacing(6)
+        self.webdav_url_edit = QLineEdit(sync_cfg.get("webdav_url", ""))
+        self.webdav_url_edit.setPlaceholderText("https://nextcloud.example.com/remote.php/dav/files/user/sync/")
+        self.webdav_user_edit = QLineEdit(sync_cfg.get("webdav_username", ""))
+        self.webdav_user_edit.setPlaceholderText("Username or email")
+        self.webdav_pass_edit = QLineEdit(sync_cfg.get("webdav_password", ""))
+        self.webdav_pass_edit.setPlaceholderText("App Password or Token")
+        self.webdav_pass_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        w_layout.addRow("WebDAV URL:", self.webdav_url_edit)
+        w_layout.addRow("Username:", self.webdav_user_edit)
+        w_layout.addRow("Password:", self.webdav_pass_edit)
+        self.stack.addWidget(webdav_page)
+
+        # 3. REST page
+        rest_page = QWidget()
+        r_layout = QFormLayout(rest_page)
+        r_layout.setContentsMargins(0, 4, 0, 0)
+        r_layout.setSpacing(6)
+        self.rest_url_edit = QLineEdit(sync_cfg.get("rest_url", ""))
+        self.rest_url_edit.setPlaceholderText("http://your-server-ip:8765")
+        self.rest_key_edit = QLineEdit(sync_cfg.get("rest_api_key", ""))
+        self.rest_key_edit.setPlaceholderText("Optional secret API key")
+        self.rest_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        r_layout.addRow("Server URL:", self.rest_url_edit)
+        r_layout.addRow("API Key:", self.rest_key_edit)
+        self.stack.addWidget(rest_page)
+
+        layout.addWidget(self.stack)
+
+        self.rb_folder.toggled.connect(lambda c: c and self.stack.setCurrentIndex(0))
+        self.rb_webdav.toggled.connect(lambda c: c and self.stack.setCurrentIndex(1))
+        self.rb_rest.toggled.connect(lambda c: c and self.stack.setCurrentIndex(2))
+        if method == "webdav": self.stack.setCurrentIndex(1)
+        elif method == "rest": self.stack.setCurrentIndex(2)
+        else: self.stack.setCurrentIndex(0)
+
+        int_row = QHBoxLayout()
+        int_lbl = QLabel("Auto-Sync Interval:")
+        int_lbl.setStyleSheet("font-size: 8.5pt; color: #aaa;")
+        self.interval_combo = QComboBox()
+        self.interval_combo.addItem("Every 30 seconds", 30)
+        self.interval_combo.addItem("Every 60 seconds (Recommended)", 60)
+        self.interval_combo.addItem("Every 2 minutes", 120)
+        self.interval_combo.addItem("Every 5 minutes", 300)
+        self.interval_combo.addItem("Every 15 minutes", 900)
+
+        cur_int = int(sync_cfg.get("auto_sync_interval_s", 60))
+        idx = self.interval_combo.findData(cur_int)
+        if idx != -1: self.interval_combo.setCurrentIndex(idx)
+        int_row.addWidget(int_lbl)
+        int_row.addWidget(self.interval_combo)
+        int_row.addStretch()
+        layout.addLayout(int_row)
+
+        self.status_lbl = QLabel(getattr(self.sync_manager, 'last_sync_status', 'Not synced yet'))
+        self.status_lbl.setStyleSheet("color: #8c96a8; font-size: 8pt; padding: 4px;")
+        self.status_lbl.setWordWrap(True)
+        layout.addWidget(self.status_lbl)
+
+        btn_layout = QHBoxLayout()
+        self.test_btn = QPushButton("Test Connection")
+        self.test_btn.clicked.connect(self._test_connection)
+        self.sync_now_btn = QPushButton("Sync Now")
+        self.sync_now_btn.clicked.connect(self._sync_now)
+
+        save_btn = QPushButton("Save & Apply")
+        save_btn.setObjectName("primaryBtn")
+        save_btn.clicked.connect(self._save_and_close)
+
+        btn_layout.addWidget(self.test_btn)
+        btn_layout.addWidget(self.sync_now_btn)
+        btn_layout.addStretch()
+        btn_layout.addWidget(save_btn)
+        layout.addLayout(btn_layout)
+
+    def _browse_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select Sync Directory", self.folder_edit.text() or os.path.expanduser("~"))
+        if folder:
+            self.folder_edit.setText(folder)
+
+    def _get_current_method(self) -> str:
+        if self.rb_webdav.isChecked(): return "webdav"
+        if self.rb_rest.isChecked(): return "rest"
+        return "folder"
+
+    def _test_connection(self):
+        method = self._get_current_method()
+        self.status_lbl.setText("Testing connection...")
+        self.status_lbl.setStyleSheet("color: #25F4EE; font-size: 8pt;")
+        QApplication.processEvents()
+
+        backend = None
+        if method == "folder":
+            backend = FolderSyncBackend(self.folder_edit.text().strip())
+        elif method == "webdav":
+            backend = WebDAVSyncBackend(
+                server_url=self.webdav_url_edit.text().strip(),
+                username=self.webdav_user_edit.text().strip(),
+                password=self.webdav_pass_edit.text().strip()
+            )
+        elif method == "rest":
+            backend = RestSyncBackend(
+                endpoint_url=self.rest_url_edit.text().strip(),
+                api_key=self.rest_key_edit.text().strip()
+            )
+
+        if backend:
+            ok, msg = backend.test_connection()
+            if ok:
+                self.status_lbl.setText(f"✅ Success: {msg}")
+                self.status_lbl.setStyleSheet("color: #00e676; font-size: 8pt;")
+            else:
+                self.status_lbl.setText(f"❌ Error: {msg}")
+                self.status_lbl.setStyleSheet("color: #ff5252; font-size: 8pt;")
+
+    def _sync_now(self):
+        self._apply_to_settings()
+        if self.sync_manager:
+            self.sync_manager.reload_config()
+            self.status_lbl.setText("Syncing now...")
+            self.status_lbl.setStyleSheet("color: #25F4EE; font-size: 8pt;")
+            QApplication.processEvents()
+            ok, msg = self.sync_manager.sync_now()
+            self.update_status(msg, is_error=not ok)
+
+    def update_status(self, msg: str, is_error: bool = False):
+        color = "#ff5252" if is_error else "#00e676"
+        icon = "❌ " if is_error else "✅ "
+        self.status_lbl.setText(icon + msg)
+        self.status_lbl.setStyleSheet(f"color: {color}; font-size: 8pt;")
+
+    def _apply_to_settings(self):
+        sync_cfg = self.settings.setdefault("sync", {})
+        sync_cfg["enabled"] = self.enable_cb.isChecked()
+        sync_cfg["method"] = self._get_current_method()
+        sync_cfg["folder_path"] = self.folder_edit.text().strip()
+        sync_cfg["webdav_url"] = self.webdav_url_edit.text().strip()
+        sync_cfg["webdav_username"] = self.webdav_user_edit.text().strip()
+        sync_cfg["webdav_password"] = self.webdav_pass_edit.text().strip()
+        sync_cfg["rest_url"] = self.rest_url_edit.text().strip()
+        sync_cfg["rest_api_key"] = self.rest_key_edit.text().strip()
+        sync_cfg["auto_sync_interval_s"] = self.interval_combo.currentData()
+        SettingsManager.save_settings(self.settings)
+
+    def _save_and_close(self):
+        self._apply_to_settings()
+        if self.sync_manager:
+            self.sync_manager.reload_config()
+        self.accept()
+
+
 class TikTokAutoLikerApp(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -796,9 +1091,15 @@ class TikTokAutoLikerApp(QMainWindow):
         self.explore_webview = None
         self._has_handled_login = False
 
+        self.sync_mgr = SyncManager(data_dir=DATA_DIR, parent=self)
+        self.sync_mgr.sync_completed.connect(self._on_sync_completed)
+        self.sync_mgr.sync_failed.connect(self._on_sync_failed)
+        self._sync_dialog = None
+
         self._apply_stylesheet()
         self._setup_ui()
         self._setup_webview_engine()
+        QTimer.singleShot(2000, self._initial_sync)
         QTimer.singleShot(3000, self.check_for_updates)
 
     def _open_kofi(self):
@@ -865,6 +1166,8 @@ class TikTokAutoLikerApp(QMainWindow):
             self.favorites[username] = new_state
             self.fav_widgets[username].set_tapper_enabled(new_state)
             SettingsManager.save_favorites(self.favorites)
+            if hasattr(self, 'sync_mgr'):
+                self.sync_mgr.record_local_change()
 
             if username in self.active_streams:
                 self.active_streams[username].set_tapper_enabled(new_state)
@@ -1015,6 +1318,8 @@ class TikTokAutoLikerApp(QMainWindow):
             if getattr(self, 'waiting_webview', None):
                 self.waiting_webview.cleanup()
                 self.waiting_webview.deleteLater()
+            if getattr(self, 'sync_mgr', None):
+                self.sync_mgr.stop()
             if getattr(self, 'login_webview', None):
                 self.login_webview.cleanup()
                 self.login_webview.deleteLater()
@@ -1237,8 +1542,14 @@ class TikTokAutoLikerApp(QMainWindow):
         self.restore_btn.setStyleSheet(btn_style)
         self.restore_btn.clicked.connect(self.restore_data)
 
+        self.cloud_sync_btn = QPushButton("☁️ Cloud Sync")
+        self.cloud_sync_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.cloud_sync_btn.setStyleSheet(btn_style)
+        self.cloud_sync_btn.clicked.connect(self.open_sync_dialog)
+
         data_layout.addWidget(self.backup_btn)
         data_layout.addWidget(self.restore_btn)
+        data_layout.addWidget(self.cloud_sync_btn)
         left_layout.addWidget(data_container)
 
         # Update Banner
@@ -1295,6 +1606,14 @@ class TikTokAutoLikerApp(QMainWindow):
         self.status_label.setObjectName("status_label")
         self.status_label.setWordWrap(True)
         left_layout.addWidget(self.status_label)
+
+        self.sync_status_lbl = QLabel("☁️ Sync: Off")
+        self.sync_status_lbl.setObjectName("sync_status_lbl")
+        self.sync_status_lbl.setStyleSheet("color: #777; font-size: 8pt; margin-top: -2px; padding: 2px 4px; border-radius: 4px;")
+        self.sync_status_lbl.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.sync_status_lbl.setToolTip("Click to open Cloud Sync settings")
+        self.sync_status_lbl.mousePressEvent = lambda e: self.open_sync_dialog()
+        left_layout.addWidget(self.sync_status_lbl)
 
         splitter.addWidget(left_panel)
 
@@ -1631,6 +1950,8 @@ class TikTokAutoLikerApp(QMainWindow):
             self._add_user_list_item(username)
             self._sort_list()
             SettingsManager.save_favorites(self.favorites)
+            if hasattr(self, 'sync_mgr'):
+                self.sync_mgr.record_local_change()
             self.search_input.clear()
             self.status_label.setText(f"● Added {username} to favorites.")
             if self.is_monitoring:
@@ -1664,6 +1985,8 @@ class TikTokAutoLikerApp(QMainWindow):
         self.fav_widgets.pop(username, None)
         self._sort_list()
         SettingsManager.save_favorites(self.favorites)
+        if hasattr(self, 'sync_mgr'):
+            self.sync_mgr.record_deletion(username)
         self.status_label.setText(f"● Removed {username} from favorites.")
 
         if getattr(self, 'is_monitoring', False) and hasattr(self, 'checker') and self.checker:
@@ -1672,10 +1995,13 @@ class TikTokAutoLikerApp(QMainWindow):
     def save_settings_ui(self):
         self.settings["like_delay_ms"] = self.delay_slider.value()
         self.settings["randomization_ms"] = self.rand_slider.value()
+        self.settings["updated_at"] = time.time()
         SettingsManager.save_settings(self.settings)
 
         for stream in self.active_streams.values():
             stream.update_settings(self.settings)
+        if hasattr(self, 'sync_mgr'):
+            self.sync_mgr.record_local_change()
 
     def reset_settings_to_default(self):
         self.delay_slider.setValue(50)
@@ -1732,7 +2058,75 @@ class TikTokAutoLikerApp(QMainWindow):
                 self.delay_slider.setValue(self.settings.get("like_delay_ms", 100))
                 self.rand_slider.setValue(self.settings.get("randomization_ms", 50))
                 self._update_status_label()
+                if hasattr(self, 'sync_mgr'):
+                    self.sync_mgr.record_local_change()
                 QMessageBox.information(self, "Restore Successful", "Data restored successfully!")
+
+    def open_sync_dialog(self):
+        if not hasattr(self, '_sync_dialog') or not self._sync_dialog:
+            self._sync_dialog = SyncSettingsDialog(self, sync_manager=self.sync_mgr, settings=self.settings)
+        self._sync_dialog.show()
+        self._sync_dialog.raise_()
+        self._sync_dialog.activateWindow()
+
+    def _initial_sync(self):
+        if hasattr(self, 'sync_mgr') and self.sync_mgr.backend:
+            self.sync_status_lbl.setText("☁️ Syncing...")
+            self.sync_mgr.sync_now_async()
+
+    def _on_sync_completed(self, msg, has_local_changes):
+        short_msg = (msg[:35] + "...") if len(msg) > 35 else msg
+        self.sync_status_lbl.setText("☁️ " + short_msg)
+        if hasattr(self, '_sync_dialog') and self._sync_dialog and self._sync_dialog.isVisible():
+            self._sync_dialog.update_status(msg, is_error=False)
+
+        if has_local_changes:
+            self.favorites = SettingsManager.load_favorites()
+            self.settings = SettingsManager.load_settings()
+
+            self.delay_slider.blockSignals(True)
+            self.rand_slider.blockSignals(True)
+            self.delay_slider.setValue(self.settings.get("like_delay_ms", 100))
+            self.rand_slider.setValue(self.settings.get("randomization_ms", 50))
+            self.delay_val_lbl.setText(f"{self.delay_slider.value()} ms")
+            self.rand_val_lbl.setText(f"{self.rand_slider.value()} ms")
+            self.delay_slider.blockSignals(False)
+            self.rand_slider.blockSignals(False)
+
+            for stream in self.active_streams.values():
+                stream.update_settings(self.settings)
+
+            current_fav_users = set(self.favorites.keys())
+            existing_widget_users = set(self.fav_widgets.keys())
+
+            for un in current_fav_users - existing_widget_users:
+                self._add_user_list_item(un)
+
+            for un in existing_widget_users - current_fav_users:
+                for i in range(self.fav_list.count()):
+                    item = self.fav_list.item(i)
+                    if item and item.data(Qt.ItemDataRole.UserRole) == un:
+                        self.fav_list.takeItem(i)
+                        break
+                self.fav_widgets.pop(un, None)
+                if hasattr(self, 'checker') and hasattr(self.checker, 'queue'):
+                    self.checker.queue = [u for u in self.checker.queue if u != un]
+
+            for un in current_fav_users & existing_widget_users:
+                state = self.favorites.get(un, True)
+                if isinstance(state, dict):
+                    state = state.get("tapper_enabled", True)
+                self.fav_widgets[un].set_tapper_enabled(state)
+                if un in self.active_streams:
+                    self.active_streams[un].set_tapper_enabled(state)
+
+            self._sort_list()
+            self._update_status_label()
+
+    def _on_sync_failed(self, err_msg):
+        self.sync_status_lbl.setText("☁️ Sync error")
+        if hasattr(self, '_sync_dialog') and self._sync_dialog and self._sync_dialog.isVisible():
+            self._sync_dialog.update_status(err_msg, is_error=True)
 
     def check_for_updates(self, manual=False):
         self._manual_update_check = manual
@@ -2062,6 +2456,11 @@ class TikTokAutoLikerApp(QMainWindow):
 
 
 if __name__ == "__main__":
+    if "--headless" in sys.argv or "--sync-only" in sys.argv:
+        from headless_runner import main as headless_main
+        headless_main()
+        sys.exit(0)
+
     app = QApplication(sys.argv)
     qInstallMessageHandler(_qt_message_handler)
 

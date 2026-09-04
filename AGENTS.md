@@ -177,34 +177,45 @@ The repository uses `.github/workflows/build.yml` with a decoupled 2-stage archi
 
 ### Step-by-Step Version Bump & Release Procedure
 
-When releasing a new version (e.g., `vX.Y.Z`):
+#### ⚠️ Version Numbering Rule (MANDATORY)
+- **Always perform a strictly sequential PATCH bump** (`Z` in `vX.Y.Z`):
+  - Example: `v1.1.0` ➔ `v1.1.1` ➔ `v1.1.2` ➔ `v1.1.3`
+- **NEVER** increment the minor (`Y`) or major (`X`) version number on your own, even for massive new features or architectural rewrites! Only bump minor or major if the user explicitly specifies a specific version number.
+- Always check the latest existing git tag using `git tag -l` and increment the patch number by exactly 1.
 
-1. **Bump Version in Code**:
+#### Two-Step Release Workflow:
+1. **Commit Feature & Code Changes First**:
+   Before bumping versions and tagging, stage and commit all functional changes:
+   ```bash
+   git add <modified_and_new_files>
+   git commit -m "feat: <descriptive summary of feature/fix>"
+   ```
+2. **Bump Version in Code**:
    In `tiktok_live_auto_liker_tapper.py`:
    ```python
    APP_VERSION = "vX.Y.Z"
    ```
-2. **Update Release Notes**:
+3. **Update Release Notes**:
    Edit `RELEASE_NOTES.md` with features, bug fixes, and download links.
-3. **Update Release Name in CI Workflow**:
+4. **Update Release Name in CI Workflow**:
    In `.github/workflows/build.yml`:
    ```yaml
    name: "vX.Y.Z - <Your Release Title>"
    ```
-4. **Test Locally**:
-   Run `python3 tiktok_live_auto_liker_tapper.py` to confirm everything launches and functions properly.
-5. **Commit and Tag**:
+5. **Test Locally**:
+   Run `python3 tiktok_live_auto_liker_tapper.py` or unit checks to confirm everything functions.
+6. **Commit Version Bump & Tag**:
    ```bash
-   git add tiktok_live_auto_liker_tapper.py RELEASE_NOTES.md .github/workflows/build.yml
+   git add tiktok_live_auto_liker_tapper.py RELEASE_NOTES.md .github/workflows/build.yml AGENTS.md README.md
    git commit -m "chore: bump version to vX.Y.Z"
    git tag -a vX.Y.Z -m "Release vX.Y.Z"
    ```
-6. **Push to GitHub**:
+7. **Push to GitHub**:
    ```bash
    git push origin main --tags
    ```
-7. **Monitor the CI/CD Pipeline**:
-   The workflow will automatically run, compile all 3 platforms, and attach the binaries to the GitHub Release.
+8. **Monitor the CI/CD Pipeline**:
+   The workflow will automatically run, compile all 3 platforms, and publish the GitHub Release with attached binaries.
 
 ---
 
@@ -254,3 +265,13 @@ When releasing a new version (e.g., `vX.Y.Z`):
   zip -r -y TikTokLiveAutoLiker-macOS.zip TikTokLiveAutoLiker.app Open_TikTokLiveAutoLiker.command
   ```
 - **User workaround** (if they don't use the launcher): `xattr -cr /path/to/TikTokLiveAutoLiker.app` in Terminal.
+
+### 🚨 Gotcha 8: Tombstone Deletions in Multi-Device Synchronization
+- **Symptom**: User deletes a creator on Device A, but upon syncing with Device B, the deleted creator reappears.
+- **Root Cause**: Naive two-way dictionary merging treats absent keys as "added by the other peer".
+- **Rule**: ALWAYS track deletions with tombstones (`tombstones: {username: deleted_at_timestamp}`). If `deleted_at >= updated_at`, the entry must remain deleted across all peers. `SyncManager` handles this automatically via conflict-free LWW merging.
+
+### 🚨 Gotcha 9: Virtual Framebuffer (`xvfb-run`) on Headless Linux Servers
+- **Symptom**: Running `headless_runner.py` on an unmonitored Linux server without an X11/Wayland desktop displays: `qt.qpa.xcb: could not connect to display`.
+- **Root Cause**: QtWebEngine Chromium renderer requires an X11 display context to initialize its GPU/compositor structures, even in headless mode.
+- **Rule**: Run with `xvfb-run -a python headless_runner.py --port 8080` (or use the provided `server/tiktok-autoliker.service` or Docker container which configure Xvfb automatically).

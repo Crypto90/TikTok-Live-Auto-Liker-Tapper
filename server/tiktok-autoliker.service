@@ -1,0 +1,18 @@
+[Unit]
+Description=TikTok Live Auto Liker Headless Server
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/tiktok-live-auto-liker
+# Run with virtual framebuffer Xvfb to support QtWebEngine on headless Linux
+ExecStart=/usr/bin/xvfb-run -a /usr/bin/python3 /opt/tiktok-live-auto-liker/headless_runner.py --port 8080
+Restart=always
+RestartSec=10
+KillSignal=SIGINT
+Environment=PYTHONUNBUFFERED=1
+Environment=QTWEBENGINE_CHROMIUM_FLAGS=--disable-logging --log-level=3 --disable-gpu-memory-buffer-video-frames
+
+[Install]
+WantedBy=multi-user.target

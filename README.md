@@ -34,6 +34,16 @@ Supports **macOS**, **Linux**, and **Windows**.
   - Adjust **Base Delay** (50ms – 500ms) and **Randomization** (0ms – 100ms) to simulate natural tapping speeds.
   - Quick **Reset** button to restore default speed settings.
 - **Login & Explore Integration**: Integrated tabs to log into your TikTok account and explore live streams directly inside the application.
+- **☁️ Multi-Device Synchronization**:
+  - Keep all your favorites, auto-tapper toggles (❤️), audio states, and speed settings in sync between **macOS**, **Windows gaming PCs**, **secondary laptops**, and **Linux servers**.
+  - **Shared Folder / Cloud Drive**: Zero-configuration sync using Dropbox, Google Drive, OneDrive, Syncthing, or local network shares.
+  - **WebDAV**: Remote cloud sync with Nextcloud, ownCloud, or Fastmail.
+  - **REST API / Central Sync Server**: Self-hosted or centralized sync server with API key authorization.
+  - Conflict-free state merging with deletion tombstones ensures changes never overwrite each other.
+- **🖥️ Headless Linux Server Mode & Web Dashboard**:
+  - Run 24/7 on servers or VPS instances with no physical monitor required (supports virtual framebuffers via Xvfb).
+  - Built-in modern, responsive dark-themed **Web Dashboard** (`http://server-ip:8080`) for remote stream monitoring, adding/removing creators, speed sliders, and live logs.
+  - Ready-to-use **systemd** service and **Docker** container configs.
 - **Modern Dark UI**: Sleek dark-mode interface with styled container boxes, horizontal-scroll prevention, and a pulsing status indicator when idle.
 
 <img width="1372" height="832" alt="image" src="https://github.com/user-attachments/assets/2d662b62-e54f-42ca-a91d-2285641963c6" />
@@ -58,6 +68,61 @@ pip install -r requirements.txt
 ### 3. Run the Application
 ```bash
 python tiktok_live_auto_liker_tapper.py
+```
+
+---
+
+## ☁️ Multi-Device Synchronization
+
+To keep all your apps in sync across your Mac, Windows gaming PC, secondary laptop, and Linux servers:
+
+1. In the application sidebar under **Data Management**, click **☁️ Cloud Sync**.
+2. Check **Enable Automatic Cloud Sync**.
+3. Choose your preferred sync method:
+   - **📁 Shared Folder / Cloud Drive**: Point to any folder inside your **Dropbox**, **OneDrive**, **Google Drive**, or **Syncthing** directory. Zero setup required!
+   - **🌐 WebDAV**: Enter your **Nextcloud** / **ownCloud** URL, username, and password.
+   - **⚡ REST API Server**: Connect to a central sync server running `sync_server.py`.
+4. Click **Test Connection**, then **Save & Apply** (or click **Sync Now** to immediately synchronize).
+
+Any creator added, heart toggled, or speed adjusted on any device will automatically propagate to all your other computers!
+
+---
+
+## 🖥️ Headless Linux Server Mode & Web Dashboard
+
+For 24/7 unmonitored liking on a home server, Raspberry Pi, or cloud VPS:
+
+### Run Headless Directly
+```bash
+# On headless Linux without a physical display, run with xvfb-run:
+xvfb-run -a python headless_runner.py --port 8080
+
+# Or via the main app CLI flag:
+xvfb-run -a python tiktok_live_auto_liker_tapper.py --headless --port 8080
+```
+
+### Access the Web Dashboard
+Open your browser and navigate to:
+```
+http://<your-server-ip>:8080
+```
+- **Live Streams**: Real-time cards of creators currently streaming with live badges, tap rates, and one-click toggles.
+- **Favorites Manager**: Add or remove creators, toggle auto-tapping (❤️) and mute (🔇).
+- **Speed Rates**: Adjust Base Delay and Randomization sliders remotely.
+- **Sync Now**: Trigger cloud sync with a single click.
+- **Activity Logs**: Real-time terminal log console.
+
+### Deploy with Docker
+```bash
+cd server
+docker compose up -d
+```
+
+### Deploy with Systemd (Ubuntu / Debian / CentOS)
+```bash
+sudo cp server/tiktok-autoliker.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now tiktok-autoliker
 ```
 
 ---
