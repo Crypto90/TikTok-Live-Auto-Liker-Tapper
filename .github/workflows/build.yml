@@ -93,7 +93,7 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          name: "v1.1.1 - Multi-Device Cloud Sync & Headless Linux Server Web Dashboard"
+          name: "v1.1.2 - Web Dashboard Cloud Sync & Cross-Device TikTok Session Sync"
           body_path: RELEASE_NOTES.md
           files: |
             release_assets/TikTokLiveAutoLiker.exe

@@ -37,12 +37,15 @@ Supports **macOS**, **Linux**, and **Windows**.
 - **☁️ Multi-Device Synchronization**:
   - Keep all your favorites, auto-tapper toggles (❤️), audio states, and speed settings in sync between **macOS**, **Windows gaming PCs**, **secondary laptops**, and **Linux servers**.
   - **Shared Folder / Cloud Drive**: Zero-configuration sync using Dropbox, Google Drive, OneDrive, Syncthing, or local network shares.
-  - **WebDAV**: Remote cloud sync with Nextcloud, ownCloud, or Fastmail.
-  - **REST API / Central Sync Server**: Self-hosted or centralized sync server with API key authorization.
-  - Conflict-free state merging with deletion tombstones ensures changes never overwrite each other.
+- **WebDAV**: Remote cloud sync with Nextcloud, ownCloud, or Fastmail.
+- **REST API / Central Sync Server**: Self-hosted or centralized sync server with API key authorization.
+- **TikTok Login Session & Cookie Synchronization**: TikTok session cookies (`sessionid`, etc.) automatically synchronize across devices so that your remote Linux servers tap and like under your authenticated TikTok account!
+- Conflict-free state merging with deletion tombstones ensures changes never overwrite each other.
 - **🖥️ Headless Linux Server Mode & Web Dashboard**:
   - Run 24/7 on servers or VPS instances with no physical monitor required (supports virtual framebuffers via Xvfb).
   - Built-in modern, responsive dark-themed **Web Dashboard** (`http://server-ip:8080`) for remote stream monitoring, adding/removing creators, speed sliders, and live logs.
+  - **Full Web-Based Cloud Sync Configuration**: Set up, test, and trigger cloud sync (Google Drive, WebDAV, REST) directly from the browser without touching terminal configs.
+  - **In-Browser Cookie Management**: View active authentication status and paste/import TikTok session cookies directly in the web UI.
   - Ready-to-use **systemd** service and **Docker** container configs.
 - **Modern Dark UI**: Sleek dark-mode interface with styled container boxes, horizontal-scroll prevention, and a pulsing status indicator when idle.
 
