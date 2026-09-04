@@ -47,6 +47,17 @@ Supports **macOS**, **Linux**, and **Windows**.
   - **Full Web-Based Cloud Sync Configuration**: Set up, test, and trigger cloud sync (Google Drive, WebDAV, REST) directly from the browser without touching terminal configs.
   - **In-Browser Cookie Management**: View active authentication status and paste/import TikTok session cookies directly in the web UI.
   - Ready-to-use **systemd** service and **Docker** container configs.
+- **📊 100% Verified Like Counting & Live Analytics**:
+  - **In-Page Server Confirmation**: Intercepts TikTok's internal `/webcast/room/like/` network requests and verifies each batch with `status_code === 0` from TikTok servers.
+  - **Real-Time Floating Stats Bar**: Live watching displays real-time verified like counts (ticking up live!), likes/sec throughput, session duration timer, and delivery confirmation percentage.
+  - **Dynamic Tab Badges**: Stream tab titles tick up dynamically as likes are confirmed (e.g. `❤️ LIVE: @kayceeedilla (❤️ 14,820)`).
+  - **Stream Session Tracking**: Automatically logs every live stream session from start to finish with duration, confirmed likes sent, taps dispatched, and room growth.
+  - **Analytics Dashboards (Desktop App & Web)**:
+    - Top KPI metric cards: Total Verified Likes, Taps Dispatched, Watch Time, and Confirmation Rate.
+    - 14-Day interactive activity timeline chart.
+    - Top Creators Leaderboard ranked by likes given.
+    - Searchable stream session history with one-click **CSV export**.
+  - **Cross-Device Stats Sync**: Stream sessions and statistics automatically merge across your desktop PCs and 24/7 headless servers!
 - **Modern Dark UI**: Sleek dark-mode interface with styled container boxes, horizontal-scroll prevention, and a pulsing status indicator when idle.
 
 <img width="1372" height="832" alt="image" src="https://github.com/user-attachments/assets/2d662b62-e54f-42ca-a91d-2285641963c6" />

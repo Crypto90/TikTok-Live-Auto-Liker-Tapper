@@ -159,7 +159,7 @@ class SyncBundle:
     """Represents the serializable sync state."""
     VERSION = 1
 
-    def __init__(self, settings: dict = None, favorites: dict = None, tombstones: dict = None, device_name: str = None, cookies: list = None, cookies_updated_at: float = 0.0):
+    def __init__(self, settings: dict = None, favorites: dict = None, tombstones: dict = None, device_name: str = None, cookies: list = None, cookies_updated_at: float = 0.0, sessions: list = None):
         self.version = self.VERSION
         self.device_name = device_name or get_device_name()
         self.timestamp = time.time()
@@ -190,6 +190,8 @@ class SyncBundle:
         # TikTok session cookies
         self.cookies: list = cookies or []
         self.cookies_updated_at: float = float(cookies_updated_at or 0.0)
+        # Stream sessions history
+        self.sessions: list = sessions or []
 
     def to_dict(self) -> dict:
         return {
@@ -200,7 +202,8 @@ class SyncBundle:
             "favorites": self.favorites,
             "tombstones": self.tombstones,
             "cookies": self.cookies,
-            "cookies_updated_at": self.cookies_updated_at
+            "cookies_updated_at": self.cookies_updated_at,
+            "sessions": self.sessions
         }
 
     @classmethod
@@ -211,7 +214,8 @@ class SyncBundle:
             tombstones=data.get("tombstones"),
             device_name=data.get("device_name"),
             cookies=data.get("cookies"),
-            cookies_updated_at=data.get("cookies_updated_at", 0.0)
+            cookies_updated_at=data.get("cookies_updated_at", 0.0),
+            sessions=data.get("sessions", [])
         )
         b.timestamp = float(data.get("timestamp", time.time()))
         return b
@@ -313,6 +317,27 @@ def merge_bundles(local: SyncBundle, remote: SyncBundle) -> Tuple[SyncBundle, bo
     else:
         merged.cookies = list(local.cookies or remote.cookies or [])
         merged.cookies_updated_at = max(loc_c_time, rem_c_time)
+
+    # 5. Merge stream sessions (conflict-free merge by session_id)
+    merged_sessions = list(local.sessions or [])
+    existing_sids = {s.get("session_id"): idx for idx, s in enumerate(merged_sessions) if isinstance(s, dict) and s.get("session_id")}
+    for rs in (remote.sessions or []):
+        if not isinstance(rs, dict) or not rs.get("session_id"):
+            continue
+        sid = rs["session_id"]
+        if sid not in existing_sids:
+            merged_sessions.append(rs)
+            local_changed = True
+        else:
+            idx = existing_sids[sid]
+            curr_v = merged_sessions[idx].get("verified_likes", 0)
+            rem_v = rs.get("verified_likes", 0)
+            if rem_v > curr_v:
+                merged_sessions[idx] = rs
+                local_changed = True
+    if len(merged_sessions) > len(remote.sessions or []):
+        remote_changed = True
+    merged.sessions = merged_sessions
 
     merged.timestamp = time.time()
     return merged, local_changed, remote_changed
@@ -723,12 +748,23 @@ class SyncManager(QObject):
         settings = self._read_settings()
         favs = self._read_favorites()
         cookies, cookies_updated_at = self._read_cookies()
+
+        local_sessions = []
+        stats_path = os.path.join(self.data_dir, "stats.json")
+        if os.path.exists(stats_path):
+            try:
+                with open(stats_path, "r", encoding="utf-8") as f:
+                    local_sessions = json.load(f).get("sessions", [])
+            except Exception:
+                pass
+
         return SyncBundle(
             settings=settings,
             favorites=favs,
             tombstones=self.tombstones,
             cookies=cookies,
-            cookies_updated_at=cookies_updated_at
+            cookies_updated_at=cookies_updated_at,
+            sessions=local_sessions
         )
 
     # --- Synchronization Execution ---
@@ -793,6 +829,14 @@ class SyncManager(QObject):
                 if merged_bundle.cookies != local_bundle.cookies:
                     self._write_cookies(merged_bundle.cookies, merged_bundle.cookies_updated_at)
                     self.cookies_updated.emit(merged_bundle.cookies)
+
+                # Update stream sessions if remote provided new sessions
+                if merged_bundle.sessions:
+                    try:
+                        from stats_manager import StatsManager
+                        StatsManager(data_dir=self.data_dir).merge_external_sessions(merged_bundle.sessions)
+                    except Exception:
+                        pass
 
             # 5. If remote needs updates, push merged bundle back to remote
             if remote_changed:

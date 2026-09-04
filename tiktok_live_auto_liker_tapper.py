@@ -10,12 +10,14 @@ import random
 import shutil
 import math
 import time
+from datetime import datetime, timezone
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QListWidget, QSpinBox, QSlider,
     QTabWidget, QTabBar, QSplitter, QGroupBox, QFormLayout, QMessageBox, QListWidgetItem, QFrame, QFileDialog, QToolButton,
-    QDialog, QComboBox, QCheckBox, QRadioButton, QButtonGroup, QStackedWidget
+    QDialog, QComboBox, QCheckBox, QRadioButton, QButtonGroup, QStackedWidget,
+    QTableWidget, QTableWidgetItem, QHeaderView
 )
 from PyQt6.QtCore import Qt, QUrl, QTimer, pyqtSignal, QObject, pyqtSlot, QMetaObject, qInstallMessageHandler, QStandardPaths, QSize, QRect
 from PyQt6.QtGui import QPainter, QColor, QIcon, QPixmap, QPainterPath, QDesktopServices, QFont
@@ -23,6 +25,7 @@ from PyQt6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkRepl
 
 from webview_engine import UniversalWebView, get_best_engine_class
 from sync_manager import SyncManager, FolderSyncBackend, WebDAVSyncBackend, RestSyncBackend
+from stats_manager import StatsManager
 
 
 def _qt_message_handler(mode, context, message):
@@ -521,15 +524,22 @@ class LiveTab(QWidget):
     # Recycle threshold: after 60 minutes, reload the stream to clear caches
     _RECYCLE_THRESHOLD_S = 60 * 60
 
-    def __init__(self, username, settings, tapper_enabled=True, is_muted=True):
+    def __init__(self, username, settings, tapper_enabled=True, is_muted=True, stats_mgr=None, tabs_widget=None):
         super().__init__()
         self.username = username
         self.settings = settings
         self.tapper_enabled = tapper_enabled
         self.is_muted = is_muted
+        self.stats_mgr = stats_mgr
+        self.tabs_widget = tabs_widget
+        self.session_id = None
         self._is_background = False
         self._stream_end_detected = False
         self._tab_opened_at = time.time()
+        self._last_stats_tick = time.time()
+        self._last_verified = 0
+        self._last_dispatched = 0
+        self._live_rate = 0.0
 
         # Stream health tracking
         self._last_video_time = -1.0
@@ -538,6 +548,47 @@ class LiveTab(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        # Sleek In-Tab Live Stats Bar Overlay
+        self.stats_bar = QWidget(self)
+        self.stats_bar.setFixedHeight(34)
+        self.stats_bar.setStyleSheet("""
+            QWidget {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #1a1a24, stop:1 #13131c);
+                border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+            }
+            QLabel {
+                color: #e0e0e0;
+                font-size: 11px;
+                font-weight: 500;
+            }
+        """)
+        sb_layout = QHBoxLayout(self.stats_bar)
+        sb_layout.setContentsMargins(12, 0, 12, 0)
+        sb_layout.setSpacing(16)
+
+        self.lbl_user = QLabel(f"<b>@{self.username}</b>", self.stats_bar)
+        self.lbl_user.setStyleSheet("color: #00f2fe; font-size: 12px;")
+        sb_layout.addWidget(self.lbl_user)
+
+        self.lbl_verified = QLabel("❤️ Verified: <b>0</b>", self.stats_bar)
+        self.lbl_verified.setStyleSheet("color: #ff2d55;")
+        sb_layout.addWidget(self.lbl_verified)
+
+        self.lbl_rate = QLabel("⚡ <b>0.0/s</b>", self.stats_bar)
+        self.lbl_rate.setStyleSheet("color: #ffcc00;")
+        sb_layout.addWidget(self.lbl_rate)
+
+        self.lbl_timer = QLabel("⏱️ <b>00:00</b>", self.stats_bar)
+        sb_layout.addWidget(self.lbl_timer)
+
+        self.lbl_confirmed = QLabel("📶 <b>100% Confirmed</b>", self.stats_bar)
+        self.lbl_confirmed.setStyleSheet("color: #2ed573;")
+        sb_layout.addWidget(self.lbl_confirmed)
+
+        sb_layout.addStretch()
+        layout.addWidget(self.stats_bar)
 
         self.webview = UniversalWebView(
             parent=self,
@@ -549,6 +600,11 @@ class LiveTab(QWidget):
         self.webview.navigation_completed.connect(self._on_nav_completed)
         layout.addWidget(self.webview)
 
+        # 1-second live stats polling timer
+        self._stats_timer = QTimer(self)
+        self._stats_timer.timeout.connect(self._poll_stats)
+        self._stats_timer.start(1000)
+
         # Stream health monitor — checks every 15s for stream end/stall/redirect
         self._health_timer = QTimer(self)
         self._health_timer.timeout.connect(self._check_stream_health_js)
@@ -559,6 +615,65 @@ class LiveTab(QWidget):
         self._recycle_timer.timeout.connect(self._recycle_if_stale)
         self._recycle_timer.start(300000)
 
+    def _poll_stats(self):
+        if not self._stream_end_detected:
+            self.webview.get_tapper_stats(self._on_tapper_stats_result)
+
+    def _on_tapper_stats_result(self, result_dict):
+        res = result_dict.get('result')
+        if isinstance(res, str):
+            try: res = json.loads(res)
+            except Exception: res = {}
+        if not isinstance(res, dict):
+            return
+
+        dispatched = int(res.get('dispatched', 0) or 0)
+        verified = int(res.get('verified', 0) or 0)
+        failed = int(res.get('failed', 0) or 0)
+        room_likes = int(res.get('roomLikes', 0) or 0)
+
+        # Calculate live rate
+        now = time.time()
+        dt = max(0.5, now - self._last_stats_tick)
+        delta_v = max(0, verified - self._last_verified)
+        delta_d = max(0, dispatched - self._last_dispatched)
+        if delta_v > 0:
+            self._live_rate = round(delta_v / dt, 1)
+        elif delta_d > 0:
+            self._live_rate = round(delta_d / dt, 1)
+        else:
+            self._live_rate = 0.0
+
+        self._last_stats_tick = now
+        self._last_verified = verified
+        self._last_dispatched = dispatched
+
+        # Format session duration
+        elapsed = int(now - self._tab_opened_at)
+        mins, secs = divmod(elapsed, 60)
+        hrs, mins = divmod(mins, 60)
+        time_str = f"{hrs:02d}:{mins:02d}:{secs:02d}" if hrs > 0 else f"{mins:02d}:{secs:02d}"
+
+        # Update stats bar labels
+        self.lbl_verified.setText(f"❤️ Verified: <b>{verified:,}</b>")
+        self.lbl_rate.setText(f"⚡ <b>{self._live_rate}/s</b>")
+        self.lbl_timer.setText(f"⏱️ <b>{time_str}</b>")
+
+        rate_pct = round((verified / max(1, dispatched)) * 100.0, 1) if dispatched > 0 else 100.0
+        self.lbl_confirmed.setText(f"📶 <b>{rate_pct}% Confirmed</b>")
+
+        # Update tab text dynamically
+        if self.tabs_widget:
+            idx = self.tabs_widget.indexOf(self)
+            if idx != -1:
+                prefix = "❤️ " if self.tapper_enabled else ""
+                count_str = f" (❤️ {verified:,})" if verified > 0 else ""
+                self.tabs_widget.setTabText(idx, f"{prefix}LIVE: @{self.username}{count_str}")
+
+        # Update StatsManager session
+        if self.stats_mgr and self.session_id:
+            self.stats_mgr.record_progress(self.session_id, verified, dispatched, failed, room_likes)
+
     def _on_nav_completed(self, success, url):
         if success:
             self.webview.set_muted(self.is_muted)
@@ -568,6 +683,10 @@ class LiveTab(QWidget):
             rand = self.settings.get("randomization_ms", 50)
             # Inject and start in-page native auto-tapper loop
             self.webview.inject_in_page_tapper(base, rand, enabled=self.tapper_enabled)
+
+            # Start tracking in StatsManager
+            if self.stats_mgr and not self.session_id:
+                self.session_id = self.stats_mgr.start_session(self.username)
 
     def _check_url_redirect(self, url):
         if self._stream_end_detected:
@@ -666,7 +785,12 @@ class LiveTab(QWidget):
             return
         self._stream_end_detected = True
         self._health_timer.stop()
+        if hasattr(self, '_stats_timer'):
+            self._stats_timer.stop()
         self.webview.stop_tapper()
+        if self.stats_mgr and self.session_id:
+            self.stats_mgr.end_session(self.session_id, reason=reason)
+            self.session_id = None
         self.stream_ended.emit(self.username, reason)
 
     def set_background_mode(self, is_background):
@@ -692,8 +816,13 @@ class LiveTab(QWidget):
 
     def cleanup(self):
         self._health_timer.stop()
+        if hasattr(self, '_stats_timer'):
+            self._stats_timer.stop()
         if hasattr(self, '_recycle_timer'):
             self._recycle_timer.stop()
+        if self.stats_mgr and self.session_id:
+            self.stats_mgr.end_session(self.session_id, reason="closed")
+            self.session_id = None
         self.webview.stop_tapper()
         self.webview.cleanup()
         self.webview.deleteLater()
@@ -768,6 +897,246 @@ class PulsingTabBar(QTabBar):
             p.setPen(Qt.PenStyle.NoPen)
             p.drawEllipse(int(dot_x), int(dot_y), dot_w, dot_w)
             p.end()
+
+
+class AnalyticsDialog(QDialog):
+    """Modern dark analytics and statistics dialog for verified likes and sessions."""
+    def __init__(self, stats_mgr, parent=None):
+        super().__init__(parent)
+        self.stats_mgr = stats_mgr
+        self.setWindowTitle("📊 Stream Analytics & Verified Likes")
+        self.resize(800, 580)
+        self.setMinimumSize(680, 480)
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #12131a;
+                color: #e0e0e0;
+            }
+            QLabel {
+                color: #e0e0e0;
+            }
+            QTabWidget::pane {
+                border: 1px solid #232535;
+                border-radius: 8px;
+                background-color: #171822;
+            }
+            QTabBar::tab {
+                background-color: #1f202e;
+                color: #8c8ea6;
+                padding: 8px 18px;
+                border-top-left-radius: 6px;
+                border-top-right-radius: 6px;
+                margin-right: 3px;
+                font-weight: 500;
+            }
+            QTabBar::tab:selected {
+                background-color: #171822;
+                color: #25F4EE;
+                border-bottom: 2px solid #25F4EE;
+            }
+            QTableWidget {
+                background-color: #171822;
+                border: none;
+                color: #e0e0e0;
+                gridline-color: #232535;
+                selection-background-color: #2b2d40;
+            }
+            QHeaderView::section {
+                background-color: #1b1c28;
+                color: #8c8ea6;
+                padding: 6px;
+                border: 1px solid #232535;
+                font-weight: bold;
+                font-size: 11px;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(14)
+
+        # Header bar
+        header_layout = QHBoxLayout()
+        title_lbl = QLabel("📊 Stream Analytics & Verified Likes")
+        title_lbl.setStyleSheet("font-size: 18px; font-weight: bold; color: #ffffff;")
+        header_layout.addWidget(title_lbl)
+        header_layout.addStretch()
+
+        export_btn = QPushButton("📥 Export CSV")
+        export_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        export_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #25F4EE;
+                color: #121212;
+                font-weight: bold;
+                padding: 6px 14px;
+                border-radius: 6px;
+            }
+            QPushButton:hover { background-color: #1dd2cd; }
+        """)
+        export_btn.clicked.connect(self._export_csv)
+        header_layout.addWidget(export_btn)
+
+        refresh_btn = QPushButton("🔄 Refresh")
+        refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        refresh_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #232535;
+                color: #e0e0e0;
+                padding: 6px 12px;
+                border-radius: 6px;
+                font-weight: 500;
+            }
+            QPushButton:hover { background-color: #2e3045; }
+        """)
+        refresh_btn.clicked.connect(self._populate_data)
+        header_layout.addWidget(refresh_btn)
+
+        layout.addLayout(header_layout)
+
+        # KPI Metric Cards
+        self.kpi_layout = QHBoxLayout()
+        self.kpi_layout.setSpacing(12)
+
+        self.card_likes = self._create_card("❤️ Verified Likes", "0", "#ff2d55")
+        self.card_taps = self._create_card("👆 Taps Dispatched", "0", "#00f2fe")
+        self.card_time = self._create_card("⏱️ Watch Time", "0m", "#ffcc00")
+        self.card_rate = self._create_card("📶 Delivery Rate", "100%", "#2ed573")
+
+        self.kpi_layout.addWidget(self.card_likes)
+        self.kpi_layout.addWidget(self.card_taps)
+        self.kpi_layout.addWidget(self.card_time)
+        self.kpi_layout.addWidget(self.card_rate)
+        layout.addLayout(self.kpi_layout)
+
+        # Tabs
+        self.tabs = QTabWidget(self)
+
+        # Tab 1: Leaderboard
+        self.leaderboard_table = QTableWidget()
+        self.leaderboard_table.setColumnCount(6)
+        self.leaderboard_table.setHorizontalHeaderLabels(["Rank", "Streamer", "Verified Likes", "Taps Dispatched", "Delivery Rate", "Sessions"])
+        self.leaderboard_table.horizontalHeader().setStretchLastSection(True)
+        self.leaderboard_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self.leaderboard_table.verticalHeader().setVisible(False)
+        self.tabs.addTab(self.leaderboard_table, "🏆 Top Creators Leaderboard")
+
+        # Tab 2: Sessions History
+        self.sessions_table = QTableWidget()
+        self.sessions_table.setColumnCount(6)
+        self.sessions_table.setHorizontalHeaderLabels(["Date & Time", "Streamer", "Duration", "Verified Likes", "Taps Dispatched", "Status"])
+        self.sessions_table.horizontalHeader().setStretchLastSection(True)
+        self.sessions_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self.sessions_table.verticalHeader().setVisible(False)
+        self.tabs.addTab(self.sessions_table, "📜 Stream Sessions History")
+
+        layout.addWidget(self.tabs)
+
+        # Close button
+        btn_box = QHBoxLayout()
+        btn_box.addStretch()
+        close_btn = QPushButton("Close")
+        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        close_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #232535;
+                color: #ffffff;
+                padding: 6px 20px;
+                border-radius: 6px;
+                font-weight: 500;
+            }
+            QPushButton:hover { background-color: #2e3045; }
+        """)
+        close_btn.clicked.connect(self.accept)
+        btn_box.addWidget(close_btn)
+        layout.addLayout(btn_box)
+
+        self._populate_data()
+
+    def _create_card(self, title: str, val: str, color: str) -> QFrame:
+        card = QFrame()
+        card.setStyleSheet("""
+            QFrame {
+                background-color: #171822;
+                border: 1px solid #232535;
+                border-radius: 8px;
+            }
+        """)
+        l = QVBoxLayout(card)
+        l.setContentsMargins(12, 10, 12, 10)
+        l.setSpacing(4)
+        t = QLabel(title)
+        t.setStyleSheet("font-size: 11px; color: #8c8ea6; font-weight: 500;")
+        v = QLabel(val)
+        v.setObjectName("val_lbl")
+        v.setStyleSheet(f"font-size: 18px; font-weight: bold; color: {color};")
+        l.addWidget(t)
+        l.addWidget(v)
+        return card
+
+    def _update_card(self, card: QFrame, val: str):
+        lbl = card.findChild(QLabel, "val_lbl")
+        if lbl:
+            lbl.setText(val)
+
+    def _populate_data(self):
+        if not self.stats_mgr:
+            return
+        kpis = self.stats_mgr.get_kpis()
+        self._update_card(self.card_likes, f"{kpis['total_verified_likes']:,}")
+        self._update_card(self.card_taps, f"{kpis['total_taps_dispatched']:,}")
+
+        # Format total duration
+        secs = kpis['total_duration_seconds']
+        m, s = divmod(secs, 60)
+        h, m = divmod(m, 60)
+        dur_str = f"{h}h {m}m" if h > 0 else f"{m}m {s}s"
+        self._update_card(self.card_time, dur_str)
+        self._update_card(self.card_rate, f"{kpis['confirmation_rate_pct']}%")
+
+        # Populate Leaderboard
+        leaders = self.stats_mgr.get_streamer_leaderboard(limit=50)
+        self.leaderboard_table.setRowCount(len(leaders))
+        for row, l in enumerate(leaders):
+            rank_str = "🥇" if row == 0 else ("🥈" if row == 1 else ("🥉" if row == 2 else f"#{row+1}"))
+            self.leaderboard_table.setItem(row, 0, QTableWidgetItem(rank_str))
+            self.leaderboard_table.setItem(row, 1, QTableWidgetItem(f"@{l['username']}"))
+            self.leaderboard_table.setItem(row, 2, QTableWidgetItem(f"❤️ {l['verified_likes']:,}"))
+            self.leaderboard_table.setItem(row, 3, QTableWidgetItem(f"{l['taps_dispatched']:,}"))
+            self.leaderboard_table.setItem(row, 4, QTableWidgetItem(f"{l['confirmation_rate']}%"))
+            self.leaderboard_table.setItem(row, 5, QTableWidgetItem(str(l['sessions_count'])))
+
+        # Populate Sessions
+        sessions = self.stats_mgr.get_recent_sessions(limit=100)
+        self.sessions_table.setRowCount(len(sessions))
+        for row, s in enumerate(sessions):
+            st = s.get('started_at', 0)
+            date_str = datetime.fromtimestamp(st, tz=timezone.utc).strftime("%Y-%m-%d %H:%M") if st else "-"
+            dur_s = s.get('duration_seconds', 0)
+            dm, ds = divmod(dur_s, 60)
+            dh, dm = divmod(dm, 60)
+            d_str = f"{dh}h {dm}m" if dh > 0 else f"{dm}m {ds}s"
+
+            self.sessions_table.setItem(row, 0, QTableWidgetItem(date_str))
+            self.sessions_table.setItem(row, 1, QTableWidgetItem(f"@{s.get('username', '')}"))
+            self.sessions_table.setItem(row, 2, QTableWidgetItem(d_str))
+            self.sessions_table.setItem(row, 3, QTableWidgetItem(f"❤️ {s.get('verified_likes', 0):,}"))
+            self.sessions_table.setItem(row, 4, QTableWidgetItem(f"{s.get('taps_dispatched', 0):,}"))
+            status_str = "🟢 Active" if s.get('status') == 'active' else s.get('status', 'completed').capitalize()
+            self.sessions_table.setItem(row, 5, QTableWidgetItem(status_str))
+
+    def _export_csv(self):
+        if not self.stats_mgr:
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Export Session Analytics CSV", "stream_analytics.csv", "CSV Files (*.csv)")
+        if path:
+            try:
+                csv_data = self.stats_mgr.export_csv()
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(csv_data)
+                QMessageBox.information(self, "Export Successful", f"Analytics data successfully exported to:\n{path}")
+            except Exception as e:
+                QMessageBox.critical(self, "Export Error", f"Failed to export CSV: {e}")
 
 
 class SyncSettingsDialog(QDialog):
@@ -1105,6 +1474,7 @@ class TikTokAutoLikerApp(QMainWindow):
         self.sync_mgr.sync_failed.connect(self._on_sync_failed)
         self.sync_mgr.cookies_updated.connect(self._on_cookies_received)
         self._sync_dialog = None
+        self.stats_mgr = StatsManager(data_dir=DATA_DIR)
 
         # Restore saved cookies if present
         saved_cookies, _ = self.sync_mgr._read_cookies()
@@ -1160,7 +1530,7 @@ class TikTokAutoLikerApp(QMainWindow):
             self.status_label.setText(f"● Opening stream manually: @{username}")
             tapper_enabled = self.favorites.get(username, True)
             is_muted = self.settings.setdefault("muted_users", {}).get(username, True)
-            tab = LiveTab(username, self.settings, tapper_enabled, is_muted)
+            tab = LiveTab(username, self.settings, tapper_enabled, is_muted, stats_mgr=self.stats_mgr, tabs_widget=self.tabs)
             tab.stream_ended.connect(self._on_stream_ended_in_tab)
 
             prefix = "❤️ " if tapper_enabled else ""
@@ -1200,7 +1570,7 @@ class TikTokAutoLikerApp(QMainWindow):
                     self.tabs.setTabText(tab_idx, f"{prefix}LIVE: @{username}")
             elif new_state and username in getattr(self, 'known_live', set()):
                 is_muted = self.settings.setdefault("muted_users", {}).get(username, True)
-                tab = LiveTab(username, self.settings, tapper_enabled=True, is_muted=is_muted)
+                tab = LiveTab(username, self.settings, tapper_enabled=True, is_muted=is_muted, stats_mgr=self.stats_mgr, tabs_widget=self.tabs)
                 tab.stream_ended.connect(self._on_stream_ended_in_tab)
                 idx = self.tabs.addTab(tab, f"❤️ LIVE: @{username}")
                 self.tabs.setCurrentIndex(idx)
@@ -1570,9 +1940,15 @@ class TikTokAutoLikerApp(QMainWindow):
         self.cloud_sync_btn.setStyleSheet(btn_style)
         self.cloud_sync_btn.clicked.connect(self.open_sync_dialog)
 
+        self.analytics_btn = QPushButton("📊 Analytics & Stats")
+        self.analytics_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.analytics_btn.setStyleSheet(btn_style)
+        self.analytics_btn.clicked.connect(self.open_analytics_dialog)
+
         data_layout.addWidget(self.backup_btn)
         data_layout.addWidget(self.restore_btn)
         data_layout.addWidget(self.cloud_sync_btn)
+        data_layout.addWidget(self.analytics_btn)
         left_layout.addWidget(data_container)
 
         # Update Banner
@@ -2119,6 +2495,10 @@ class TikTokAutoLikerApp(QMainWindow):
         self._sync_dialog.raise_()
         self._sync_dialog.activateWindow()
 
+    def open_analytics_dialog(self):
+        dlg = AnalyticsDialog(self.stats_mgr, parent=self)
+        dlg.exec()
+
     def _initial_sync(self):
         if hasattr(self, 'sync_mgr') and self.sync_mgr.backend:
             self.sync_status_lbl.setText("☁️ Syncing...")
@@ -2357,7 +2737,7 @@ class TikTokAutoLikerApp(QMainWindow):
             tapper_enabled = self.favorites.get(username, True)
             if username not in self.active_streams and tapper_enabled:
                 is_muted = self.settings.setdefault("muted_users", {}).get(username, True)
-                tab = LiveTab(username, self.settings, tapper_enabled, is_muted)
+                tab = LiveTab(username, self.settings, tapper_enabled, is_muted, stats_mgr=self.stats_mgr, tabs_widget=self.tabs)
                 tab.stream_ended.connect(self._on_stream_ended_in_tab)
 
                 prefix = "❤️ " if tapper_enabled else ""

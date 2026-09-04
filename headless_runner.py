@@ -65,6 +65,7 @@ from PyQt6.QtCore import QTimer, QObject, pyqtSlot
 from webview_engine import UniversalWebView
 from sync_manager import SyncManager, get_device_name
 from web_server import HeadlessWebServer
+from stats_manager import StatsManager
 
 
 def get_server_data_dir() -> str:
@@ -82,14 +83,23 @@ os.makedirs(USER_DATA_DIR, exist_ok=True)
 
 class HeadlessStreamTab(QObject):
     """Headless tapping session for an active live streamer."""
-    def __init__(self, username: str, settings: dict, tapper_enabled: bool = True, parent=None):
+    def __init__(self, username: str, settings: dict, tapper_enabled: bool = True, stats_mgr=None, parent=None):
         super().__init__(parent)
         self.username = username
         self.settings = settings
         self.tapper_enabled = tapper_enabled
+        self.stats_mgr = stats_mgr
+        self.session_id = None
         self.is_muted = True
         self.start_time = time.time()
         self.is_active = True
+        self.verified_likes = 0
+        self.taps_dispatched = 0
+        self.room_likes = 0
+        self.live_rate = 0.0
+        self._last_verified = 0
+        self._last_dispatched = 0
+        self._last_stats_tick = time.time()
 
         self.webview = UniversalWebView(
             parent=None,
@@ -100,10 +110,53 @@ class HeadlessStreamTab(QObject):
         self.webview.set_muted(True)
         self.webview.navigation_completed.connect(self._on_nav_completed)
 
+        # 1-second live stats polling timer
+        self._stats_timer = QTimer(self)
+        self._stats_timer.timeout.connect(self._poll_stats)
+        self._stats_timer.start(1000)
+
         # Health monitor timer (every 15 seconds)
         self._health_timer = QTimer(self)
         self._health_timer.timeout.connect(self._check_health)
         self._health_timer.start(15000)
+
+    def _poll_stats(self):
+        if self.is_active:
+            self.webview.get_tapper_stats(self._on_tapper_stats_result)
+
+    def _on_tapper_stats_result(self, result_dict):
+        res = result_dict.get('result', {})
+        if isinstance(res, str):
+            try: res = json.loads(res)
+            except Exception: res = {}
+        if not isinstance(res, dict):
+            return
+
+        dispatched = int(res.get('dispatched', 0) or 0)
+        verified = int(res.get('verified', 0) or 0)
+        failed = int(res.get('failed', 0) or 0)
+        room_likes = int(res.get('roomLikes', 0) or 0)
+
+        now = time.time()
+        dt = max(0.5, now - self._last_stats_tick)
+        delta_v = max(0, verified - self._last_verified)
+        delta_d = max(0, dispatched - self._last_dispatched)
+        if delta_v > 0:
+            self.live_rate = round(delta_v / dt, 1)
+        elif delta_d > 0:
+            self.live_rate = round(delta_d / dt, 1)
+        else:
+            self.live_rate = 0.0
+
+        self._last_stats_tick = now
+        self._last_verified = verified
+        self._last_dispatched = dispatched
+        self.verified_likes = verified
+        self.taps_dispatched = dispatched
+        self.room_likes = room_likes
+
+        if self.stats_mgr and self.session_id:
+            self.stats_mgr.record_progress(self.session_id, verified, dispatched, failed, room_likes)
 
     def _on_nav_completed(self, success, url):
         if success:
@@ -112,6 +165,9 @@ class HeadlessStreamTab(QObject):
             base = self.settings.get("like_delay_ms", 100)
             rand = self.settings.get("randomization_ms", 50)
             self.webview.inject_in_page_tapper(base, rand, enabled=self.tapper_enabled)
+
+            if self.stats_mgr and not self.session_id:
+                self.session_id = self.stats_mgr.start_session(self.username)
 
     def set_tapper_enabled(self, enabled: bool):
         self.tapper_enabled = enabled
@@ -143,6 +199,11 @@ class HeadlessStreamTab(QObject):
 
     def cleanup(self):
         self._health_timer.stop()
+        if hasattr(self, '_stats_timer'):
+            self._stats_timer.stop()
+        if self.stats_mgr and self.session_id:
+            self.stats_mgr.end_session(self.session_id, reason="ended")
+            self.session_id = None
         self.webview.stop_tapper()
         self.webview.cleanup()
         self.webview.deleteLater()
@@ -162,6 +223,7 @@ class HeadlessServerManager(QObject):
         self.sync_mgr.sync_completed.connect(self._on_sync_completed)
         self.sync_mgr.sync_failed.connect(self._on_sync_failed)
         self.sync_mgr.cookies_updated.connect(self._on_cookies_updated)
+        self.stats_mgr = StatsManager(data_dir=DATA_DIR)
 
         # Restore saved cookies if present
         saved_cookies, _ = self.sync_mgr._read_cookies()
@@ -295,7 +357,7 @@ class HeadlessServerManager(QObject):
                     tapper_enabled = tapper_enabled.get("tapper_enabled", True)
                 if tapper_enabled and username not in self.active_streams:
                     self.log(f"[TAPPING STARTED] Mounting stream and starting auto-tapper for @{username}...")
-                    tab = HeadlessStreamTab(username, self.settings, tapper_enabled=True, parent=self)
+                    tab = HeadlessStreamTab(username, self.settings, tapper_enabled=True, stats_mgr=self.stats_mgr, parent=self)
                     self.active_streams[username] = tab
         else:
             self.known_live.discard(username)
@@ -344,7 +406,12 @@ class HeadlessServerManager(QObject):
                 "tapper_enabled": tab.tapper_enabled,
                 "is_muted": tab.is_muted,
                 "avatar_url": self.avatars.get(un, ""),
-                "base_delay_ms": tab.settings.get("like_delay_ms", 100)
+                "base_delay_ms": tab.settings.get("like_delay_ms", 100),
+                "verified_likes": tab.verified_likes,
+                "taps_dispatched": tab.taps_dispatched,
+                "live_rate": tab.live_rate,
+                "room_likes": tab.room_likes,
+                "duration_seconds": int(time.time() - tab.start_time)
             })
 
         return {
@@ -499,10 +566,27 @@ class HeadlessServerManager(QObject):
     def get_recent_logs(self) -> list:
         return [f"[{entry['time']}] {entry['message']}" for entry in self.logs]
 
+    def get_stats_kpis(self) -> dict:
+        return self.stats_mgr.get_kpis()
+
+    def get_stats_chart(self, days: int = 14) -> dict:
+        return self.stats_mgr.get_daily_chart_data(days=days)
+
+    def get_stats_leaderboard(self, limit: int = 10) -> list:
+        return self.stats_mgr.get_streamer_leaderboard(limit=limit)
+
+    def get_stats_sessions(self, limit: int = 50) -> list:
+        return self.stats_mgr.get_recent_sessions(limit=limit)
+
+    def export_stats_csv(self) -> str:
+        return self.stats_mgr.export_csv()
+
     def cleanup(self):
         self.monitor_timer.stop()
         self.status_log_timer.stop()
         self.sync_mgr.stop()
+        if hasattr(self, 'stats_mgr'):
+            self.stats_mgr.save_now()
         if self.web_server:
             self.web_server.stop()
         for tab in self.active_streams.values():

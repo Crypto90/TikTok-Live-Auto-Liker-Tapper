@@ -824,10 +824,52 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             color: #fff;
         }
 
+        .analytics-table th, .analytics-table td {
+            padding: 10px 12px;
+            border-bottom: 1px solid var(--border-subtle);
+        }
+        .analytics-table tr:hover {
+            background-color: rgba(255, 255, 255, 0.02);
+        }
+        .leaderboard-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 8px 12px;
+            background: var(--bg-surface);
+            border-radius: 6px;
+            border: 1px solid var(--border-subtle);
+        }
+        .chart-bar-col {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            height: 180px;
+            justify-content: flex-end;
+            gap: 6px;
+        }
+        .chart-bar {
+            width: 100%;
+            max-width: 28px;
+            background: linear-gradient(180deg, #ff2d55 0%, #b81636 100%);
+            border-radius: 4px 4px 0 0;
+            transition: height 0.3s ease;
+        }
+        .chart-bar:hover {
+            filter: brightness(1.2);
+        }
+        .chart-label {
+            font-size: 0.65rem;
+            color: var(--text-muted);
+            white-space: nowrap;
+        }
+
         @media (max-width: 768px) {
             header { padding: 0.75rem 1rem; }
             main { padding: 1rem; }
             .stats-grid { grid-template-columns: 1fr 1fr; }
+            .analytics-grid { grid-template-columns: 1fr !important; }
         }
     </style>
 </head>
@@ -874,6 +916,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             <button class="tab-btn active" id="tabStreamsBtn" onclick="switchTab('streams')">📡 Active Streams</button>
             <button class="tab-btn" id="tabFavsBtn" onclick="switchTab('favorites')">⭐ Favorites Manager</button>
             <button class="tab-btn" id="tabSettingsBtn" onclick="switchTab('settings')">⚙️ Settings & Sync</button>
+            <button class="tab-btn" id="tabAnalyticsBtn" onclick="switchTab('analytics')">📊 Analytics & Stats</button>
             <button class="tab-btn" id="tabLogsBtn" onclick="switchTab('logs')">📜 Activity Logs</button>
         </div>
 
@@ -1066,6 +1109,80 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                 </div>
             </div>
         </div>
+
+        <!-- Tab 5: Analytics & Stats -->
+        <div class="tab-pane" id="pane-analytics">
+            <!-- 4 Top KPI Cards -->
+            <div class="stats-grid" style="margin-bottom: 1.5rem;">
+                <div class="stat-card">
+                    <div class="stat-title">Total Verified Likes</div>
+                    <div class="stat-value" id="kpiVerifiedLikes" style="color: #ff2d55;">0</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-title">Taps Dispatched</div>
+                    <div class="stat-value" id="kpiTapsDispatched" style="color: #00f2fe;">0</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-title">Total Watch Time</div>
+                    <div class="stat-value" id="kpiWatchTime" style="color: #ffcc00;">0m</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-title">Confirmed Delivery</div>
+                    <div class="stat-value" id="kpiDeliveryRate" style="color: #2ed573;">100%</div>
+                </div>
+            </div>
+
+            <!-- Two-column grid: Chart & Leaderboard -->
+            <div class="analytics-grid" style="display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem; margin-bottom: 1.5rem;">
+                <!-- 14-Day Activity Chart Card -->
+                <div class="card">
+                    <div class="card-header">
+                        <div class="card-title">📈 14-Day Likes Activity</div>
+                    </div>
+                    <div id="analyticsChartContainer" style="padding: 1rem 0; min-height: 200px; display: flex; align-items: flex-end; justify-content: space-between; gap: 6px;">
+                        <!-- Dynamically populated -->
+                    </div>
+                </div>
+
+                <!-- Top Creators Leaderboard Card -->
+                <div class="card">
+                    <div class="card-header">
+                        <div class="card-title">🏆 Top Creators Leaderboard</div>
+                    </div>
+                    <div id="analyticsLeaderboardContainer" style="display: flex; flex-direction: column; gap: 8px; max-height: 240px; overflow-y: auto;">
+                        <!-- Dynamically populated -->
+                    </div>
+                </div>
+            </div>
+
+            <!-- Stream Sessions History Card -->
+            <div class="card">
+                <div class="card-header" style="display: flex; justify-content: space-between; align-items: center;">
+                    <div class="card-title">📜 Stream Sessions History</div>
+                    <div style="display: flex; gap: 8px;">
+                        <a href="/api/stats/export" download="stream_analytics.csv" class="btn btn-secondary" style="text-decoration: none; padding: 6px 12px; font-size: 0.8rem;">📥 Export CSV</a>
+                        <button class="btn btn-secondary" onclick="fetchAnalytics()" style="padding: 6px 12px; font-size: 0.8rem;">🔄 Refresh</button>
+                    </div>
+                </div>
+                <div style="overflow-x: auto;">
+                    <table class="analytics-table" style="width: 100%; border-collapse: collapse; font-size: 0.85rem; text-align: left;">
+                        <thead>
+                            <tr style="border-bottom: 1px solid var(--border-subtle); color: var(--text-muted);">
+                                <th style="padding: 8px 12px;">Date & Time</th>
+                                <th style="padding: 8px 12px;">Streamer</th>
+                                <th style="padding: 8px 12px;">Duration</th>
+                                <th style="padding: 8px 12px;">Verified Likes</th>
+                                <th style="padding: 8px 12px;">Taps Dispatched</th>
+                                <th style="padding: 8px 12px;">Status</th>
+                            </tr>
+                        </thead>
+                        <tbody id="analyticsSessionsTbody">
+                            <!-- Dynamically populated -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
     </main>
 
     <div id="toast">Notification</div>
@@ -1111,6 +1228,16 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             document.getElementById('tab' + tabId.charAt(0).toUpperCase() + tabId.slice(1) + 'Btn').classList.add('active');
             document.getElementById('pane-' + tabId).classList.add('active');
             if (tabId === 'logs') fetchLogs();
+            if (tabId === 'analytics') fetchAnalytics();
+        }
+
+        function formatDuration(seconds) {
+            const h = Math.floor(seconds / 3600);
+            const m = Math.floor((seconds % 3600) / 60);
+            const s = Math.floor(seconds % 60);
+            if (h > 0) return `${h}h ${m}m ${s}s`;
+            if (m > 0) return `${m}m ${s}s`;
+            return `${s}s`;
         }
 
         function formatUptime(seconds) {
@@ -1160,13 +1287,17 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                             <img class="stream-avatar" src="${s.avatar_url || 'data:image/svg+xml;utf8,<svg xmlns=\\'http://www.w3.org/2000/svg\\' width=\\'40\\' height=\\'40\\' fill=\\'%23555\\'><circle cx=\\'20\\' cy=\\'20\\' r=\\'20\\'/></svg>'}" alt="${s.username}">
                             <div class="stream-info">
                                 <h4>@${s.username}</h4>
-                                <p>Rate: ~${s.base_delay_ms || 100}ms</p>
+                                <p>Rate: ~${s.base_delay_ms || 100}ms ${s.live_rate ? '• ⚡ ' + s.live_rate + '/s' : ''}</p>
                             </div>
                         </div>
                         <div class="live-badge">
                             <div class="live-pulse"></div>
                             LIVE
                         </div>
+                    </div>
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin: 8px 0; padding: 6px 10px; background: rgba(255,255,255,0.03); border-radius: 6px; font-size: 0.8rem;">
+                        <span style="color: #ff2d55; font-weight: 600;">❤️ Verified: ${(s.verified_likes || 0).toLocaleString()}</span>
+                        <span style="color: var(--text-muted);">⏱️ ${formatDuration(s.duration_seconds || 0)}</span>
                     </div>
                     <div class="stream-controls">
                         <span style="font-size: 0.85rem; color: var(--text-muted);">Auto-Tapper:</span>
@@ -1181,6 +1312,120 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                     </div>
                 </div>
             `).join('');
+        }
+
+        async function fetchAnalytics() {
+            try {
+                const [kpisRes, chartRes, leadersRes, sessRes] = await Promise.all([
+                    fetch('/api/stats/kpis'),
+                    fetch('/api/stats/chart'),
+                    fetch('/api/stats/leaderboard'),
+                    fetch('/api/stats/sessions')
+                ]);
+
+                if (kpisRes.ok) {
+                    const k = await kpisRes.json();
+                    document.getElementById('kpiVerifiedLikes').textContent = (k.total_verified_likes || 0).toLocaleString();
+                    document.getElementById('kpiTapsDispatched').textContent = (k.total_taps_dispatched || 0).toLocaleString();
+                    const d = k.total_duration_seconds || 0;
+                    const m = Math.floor(d / 60);
+                    const h = Math.floor(m / 60);
+                    document.getElementById('kpiWatchTime').textContent = h > 0 ? `${h}h ${m % 60}m` : `${m}m`;
+                    document.getElementById('kpiDeliveryRate').textContent = `${k.confirmation_rate_pct || 100}%`;
+                }
+
+                if (chartRes.ok) {
+                    const c = await chartRes.json();
+                    renderAnalyticsChart(c);
+                }
+
+                if (leadersRes.ok) {
+                    const l = await leadersRes.json();
+                    renderAnalyticsLeaderboard(l);
+                }
+
+                if (sessRes.ok) {
+                    const s = await sessRes.json();
+                    renderAnalyticsSessions(s);
+                }
+            } catch (e) {
+                console.error("Error fetching analytics:", e);
+            }
+        }
+
+        function renderAnalyticsChart(data) {
+            const container = document.getElementById('analyticsChartContainer');
+            if (!data || !data.labels || !data.labels.length) {
+                container.innerHTML = '<div style="color: var(--text-muted); text-align: center; width: 100%;">No activity data yet.</div>';
+                return;
+            }
+
+            const maxLikes = Math.max(...data.verified_likes, 1);
+            container.innerHTML = data.labels.map((lbl, i) => {
+                const val = data.verified_likes[i] || 0;
+                const hPct = Math.max(6, Math.round((val / maxLikes) * 140));
+                return `
+                    <div class="chart-bar-col" title="${lbl}: ${val.toLocaleString()} likes">
+                        <span style="font-size: 0.65rem; color: #888;">${val > 0 ? (val > 999 ? Math.round(val/1000) + 'k' : val) : ''}</span>
+                        <div class="chart-bar" style="height: ${hPct}px;"></div>
+                        <span class="chart-label">${lbl}</span>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function renderAnalyticsLeaderboard(leaders) {
+            const container = document.getElementById('analyticsLeaderboardContainer');
+            if (!leaders || !leaders.length) {
+                container.innerHTML = '<div style="color: var(--text-muted); padding: 1rem; text-align: center;">No streamer stats recorded yet.</div>';
+                return;
+            }
+
+            container.innerHTML = leaders.map((l, i) => `
+                <div class="leaderboard-row">
+                    <div style="display: flex; align-items: center; gap: 10px;">
+                        <span style="font-weight: 700; color: ${i === 0 ? '#ffcc00' : (i === 1 ? '#00f2fe' : (i === 2 ? '#ff2d55' : 'var(--text-muted)'))}; font-size: 0.9rem;">
+                            #${i + 1}
+                        </span>
+                        <span style="font-weight: 600; color: #fff;">@${l.username}</span>
+                    </div>
+                    <div style="text-align: right;">
+                        <div style="color: #ff2d55; font-weight: 700; font-size: 0.85rem;">❤️ ${l.verified_likes.toLocaleString()}</div>
+                        <div style="font-size: 0.7rem; color: var(--text-muted);">${l.sessions_count} sessions • ${l.confirmation_rate}%</div>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function renderAnalyticsSessions(sessions) {
+            const tbody = document.getElementById('analyticsSessionsTbody');
+            if (!sessions || !sessions.length) {
+                tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: var(--text-muted); padding: 1.5rem;">No stream sessions recorded yet.</td></tr>';
+                return;
+            }
+
+            tbody.innerHTML = sessions.map(s => {
+                const dateStr = s.started_at ? new Date(s.started_at * 1000).toLocaleString() : '-';
+                const durS = s.duration_seconds || 0;
+                const m = Math.floor(durS / 60);
+                const h = Math.floor(m / 60);
+                const durStr = h > 0 ? `${h}h ${m % 60}m` : `${m}m ${durS % 60}s`;
+                const isAct = s.status === 'active';
+                const statusBadge = isAct
+                    ? '<span style="color: #2ed573; font-weight: 600;">● Active</span>'
+                    : `<span style="color: var(--text-muted);">${s.status || 'Completed'}</span>`;
+
+                return `
+                    <tr>
+                        <td style="color: var(--text-muted);">${dateStr}</td>
+                        <td style="font-weight: 600; color: #fff;">@${s.username}</td>
+                        <td>${durStr}</td>
+                        <td style="color: #ff2d55; font-weight: 600;">❤️ ${(s.verified_likes || 0).toLocaleString()}</td>
+                        <td style="color: var(--text-muted);">${(s.taps_dispatched || 0).toLocaleString()}</td>
+                        <td>${statusBadge}</td>
+                    </tr>
+                `;
+            }).join('');
         }
 
         async function fetchFavorites() {
@@ -1623,6 +1868,47 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(200, {"is_authenticated": False, "cookie_count": 0})
                 return
             self._send_json(200, runner.get_cookie_status())
+            return
+
+        if path == "/api/stats/kpis":
+            if not runner:
+                self._send_json(200, {})
+                return
+            self._send_json(200, runner.get_stats_kpis())
+            return
+
+        if path == "/api/stats/chart":
+            if not runner:
+                self._send_json(200, {})
+                return
+            self._send_json(200, runner.get_stats_chart())
+            return
+
+        if path == "/api/stats/leaderboard":
+            if not runner:
+                self._send_json(200, [])
+                return
+            self._send_json(200, runner.get_stats_leaderboard())
+            return
+
+        if path == "/api/stats/sessions":
+            if not runner:
+                self._send_json(200, [])
+                return
+            self._send_json(200, runner.get_stats_sessions())
+            return
+
+        if path == "/api/stats/export":
+            if not runner:
+                self._send_json(400, {"error": "No runner"})
+                return
+            csv_data = runner.export_stats_csv().encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/csv; charset=utf-8")
+            self.send_header("Content-Disposition", 'attachment; filename="stream_analytics.csv"')
+            self.send_header("Content-Length", str(len(csv_data)))
+            self.end_headers()
+            self.wfile.write(csv_data)
             return
 
         self._send_json(404, {"error": "Not found"})

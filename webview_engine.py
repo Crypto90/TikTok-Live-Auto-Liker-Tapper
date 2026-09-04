@@ -57,12 +57,160 @@ TAPPER_IN_PAGE_SCRIPT = """
         cleanupTimerId: null
     };
 
+    var stats = {
+        dispatched: 0,
+        verified: 0,
+        failed: 0,
+        roomLikes: 0,
+        lastAckTime: 0,
+        startTime: Date.now()
+    };
+
+    // --- Transparent Network Sniffer & Server Like Verifier ---
+    try {
+        if (!window.__tiktokNetworkHooked) {
+            window.__tiktokNetworkHooked = true;
+
+            // 1. Hook window.fetch
+            if (typeof window.fetch === 'function') {
+                var origFetch = window.fetch;
+                window.fetch = async function() {
+                    var args = Array.prototype.slice.call(arguments);
+                    var url = '';
+                    try {
+                        if (typeof args[0] === 'string') url = args[0];
+                        else if (args[0] && args[0].url) url = args[0].url;
+                    } catch(e) {}
+
+                    var isLikeReq = /webcast\/room\/(like|digg)/i.test(url) || /webcast\/.*like/i.test(url);
+                    var batchCount = 1;
+
+                    if (isLikeReq) {
+                        try {
+                            var countMatch = url.match(/[?&]count=(\d+)/i);
+                            if (countMatch && countMatch[1]) {
+                                batchCount = parseInt(countMatch[1], 10) || 1;
+                            } else if (args[1] && args[1].body && typeof args[1].body === 'string') {
+                                var bodyMatch = args[1].body.match(/count=(\d+)/i) || args[1].body.match(/"count"\s*:\s*(\d+)/i);
+                                if (bodyMatch && bodyMatch[1]) {
+                                    batchCount = parseInt(bodyMatch[1], 10) || 1;
+                                }
+                            }
+                        } catch(e) {}
+                    }
+
+                    var response;
+                    try {
+                        response = await origFetch.apply(this, args);
+                    } catch(err) {
+                        if (isLikeReq) stats.failed++;
+                        throw err;
+                    }
+
+                    if (isLikeReq && response) {
+                        try {
+                            if (response.ok) {
+                                var clone = response.clone();
+                                clone.json().then(function(data) {
+                                    if (data && data.status_code === 0) {
+                                        stats.verified += batchCount;
+                                        stats.lastAckTime = Date.now();
+                                        if (data.data && typeof data.data.like_count === 'number') {
+                                            stats.roomLikes = data.data.like_count;
+                                        }
+                                    } else if (!data || data.status_code === undefined) {
+                                        stats.verified += batchCount;
+                                        stats.lastAckTime = Date.now();
+                                    } else {
+                                        stats.failed++;
+                                    }
+                                }).catch(function() {
+                                    if (response.ok) {
+                                        stats.verified += batchCount;
+                                        stats.lastAckTime = Date.now();
+                                    }
+                                });
+                            } else {
+                                stats.failed++;
+                            }
+                        } catch(e) {}
+                    }
+
+                    return response;
+                };
+            }
+
+            // 2. Hook XMLHttpRequest
+            if (typeof window.XMLHttpRequest === 'function') {
+                var origOpen = XMLHttpRequest.prototype.open;
+                var origSend = XMLHttpRequest.prototype.send;
+
+                XMLHttpRequest.prototype.open = function(method, url) {
+                    this.__ttUrl = url || '';
+                    this.__ttMethod = method || '';
+                    return origOpen.apply(this, arguments);
+                };
+
+                XMLHttpRequest.prototype.send = function(body) {
+                    var xhr = this;
+                    var url = xhr.__ttUrl || '';
+                    var isLikeReq = /webcast\/room\/(like|digg)/i.test(url) || /webcast\/.*like/i.test(url);
+
+                    if (isLikeReq) {
+                        var batchCount = 1;
+                        try {
+                            var countMatch = url.match(/[?&]count=(\d+)/i);
+                            if (countMatch && countMatch[1]) {
+                                batchCount = parseInt(countMatch[1], 10) || 1;
+                            } else if (body && typeof body === 'string') {
+                                var bodyMatch = body.match(/count=(\d+)/i) || body.match(/"count"\s*:\s*(\d+)/i);
+                                if (bodyMatch && bodyMatch[1]) {
+                                    batchCount = parseInt(bodyMatch[1], 10) || 1;
+                                }
+                            }
+                        } catch(e) {}
+
+                        xhr.addEventListener('load', function() {
+                            try {
+                                if (xhr.status >= 200 && xhr.status < 300) {
+                                    var data = null;
+                                    try { data = JSON.parse(xhr.responseText); } catch(e) {}
+                                    if (data && data.status_code === 0) {
+                                        stats.verified += batchCount;
+                                        stats.lastAckTime = Date.now();
+                                        if (data.data && typeof data.data.like_count === 'number') {
+                                            stats.roomLikes = data.data.like_count;
+                                        }
+                                    } else if (!data) {
+                                        stats.verified += batchCount;
+                                        stats.lastAckTime = Date.now();
+                                    } else {
+                                        stats.failed++;
+                                    }
+                                } else {
+                                    stats.failed++;
+                                }
+                            } catch(e) {}
+                        });
+
+                        xhr.addEventListener('error', function() {
+                            stats.failed++;
+                        });
+                    }
+
+                    return origSend.apply(this, arguments);
+                };
+            }
+        }
+    } catch(e) {}
+
     function getNextDelay() {
         return Math.max(50, state.baseDelay + Math.floor(Math.random() * (state.randomization + 1)));
     }
 
     function triggerTap() {
         if (!state.enabled) return;
+        stats.dispatched++;
 
         // 1. Dispatch 'L' key with proper bubbling
         try {
@@ -122,6 +270,19 @@ TAPPER_IN_PAGE_SCRIPT = """
                     c.removeChild(c.children[0]);
                 }
             });
+
+            // Fallback room like count scan from DOM elements if available
+            var likeEl = document.querySelector('[data-e2e="live-room-like-count"]') ||
+                         document.querySelector('[class*="LikeCount"]') ||
+                         document.querySelector('[class*="like-count"]');
+            if (likeEl && likeEl.innerText) {
+                var text = likeEl.innerText.trim();
+                var mult = 1;
+                if (/k$/i.test(text)) { mult = 1000; text = text.replace(/k$/i, ''); }
+                else if (/m$/i.test(text)) { mult = 1000000; text = text.replace(/m$/i, ''); }
+                var val = parseFloat(text.replace(/,/g, ''));
+                if (!isNaN(val)) stats.roomLikes = Math.max(stats.roomLikes, Math.round(val * mult));
+            }
         } catch(e) {}
     }
 
@@ -161,6 +322,17 @@ TAPPER_IN_PAGE_SCRIPT = """
         if (state.cleanupTimerId) clearInterval(state.cleanupTimerId);
         state.timerId = null;
         state.cleanupTimerId = null;
+    };
+
+    window.__tiktokGetStats = function() {
+        return {
+            dispatched: stats.dispatched,
+            verified: stats.verified,
+            failed: stats.failed,
+            roomLikes: stats.roomLikes,
+            lastAckTime: stats.lastAckTime,
+            uptimeSeconds: Math.round((Date.now() - stats.startTime) / 1000)
+        };
     };
 })();
 """
@@ -944,6 +1116,11 @@ class UniversalWebView(QWidget):
 
     def stop_tapper(self):
         self._engine.stop_tapper()
+
+    def get_tapper_stats(self, callback):
+        """Query live in-page tapper stats (dispatched, verified, failed, roomLikes, uptimeSeconds)."""
+        js_code = "(function() { return window.__tiktokGetStats ? window.__tiktokGetStats() : { dispatched: 0, verified: 0, failed: 0, roomLikes: 0, uptimeSeconds: 0 }; })()"
+        self.evaluate_js(js_code, callback)
 
     def reload(self):
         self._engine.reload()
