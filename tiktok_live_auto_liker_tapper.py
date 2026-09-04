@@ -1,8 +1,19 @@
 import os
 import sys
 
-# Suppress C++ stderr console spam from QtWebEngine & QFont
-os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--disable-logging --log-level=3 --disable-gpu-memory-buffer-video-frames"
+# Suppress C++ stderr console spam from QtWebEngine & QFont, and prevent Chromium/WebView2 background timer throttling
+CHROMIUM_ANTI_THROTTLING_FLAGS = (
+    "--disable-background-timer-throttling "
+    "--disable-backgrounding-occluded-windows "
+    "--disable-renderer-backgrounding "
+    "--disable-features=CalculateNativeWinOcclusion,IntensiveWakeUpThrottling,ThrottleDisplayNoneAndVisibilityHiddenCrossOriginIframes"
+)
+os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = (
+    "--disable-logging --log-level=3 --disable-gpu-memory-buffer-video-frames " + CHROMIUM_ANTI_THROTTLING_FLAGS
+)
+existing_wv2 = os.environ.get("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "")
+if "--disable-background-timer-throttling" not in existing_wv2:
+    os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = (existing_wv2 + " " + CHROMIUM_ANTI_THROTTLING_FLAGS).strip()
 os.environ["QT_LOGGING_RULES"] = "qt.qpa.fonts.warning=false"
 
 import json
@@ -643,6 +654,10 @@ class LiveTab(QWidget):
             self._live_rate = round(delta_d / dt, 1)
         else:
             self._live_rate = 0.0
+
+        # Watchdog: if auto-tapper is enabled and tab is in background, ensure taps advance unthrottled
+        if self.tapper_enabled and self._is_background and delta_d <= 1 and dt >= 1.0:
+            self.webview.wakeup_tapper()
 
         self._last_stats_tick = now
         self._last_verified = verified

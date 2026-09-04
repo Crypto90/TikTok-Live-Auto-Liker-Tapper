@@ -13,6 +13,22 @@ from ctypes import c_void_p
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QMainWindow
 from PyQt6.QtCore import Qt, QUrl, pyqtSignal, QObject, QTimer
 
+# Configure Chromium / WebView2 anti-throttling flags so background tabs run timers unthrottled
+CHROMIUM_ANTI_THROTTLING_FLAGS = (
+    "--disable-background-timer-throttling "
+    "--disable-backgrounding-occluded-windows "
+    "--disable-renderer-backgrounding "
+    "--disable-features=CalculateNativeWinOcclusion,IntensiveWakeUpThrottling,ThrottleDisplayNoneAndVisibilityHiddenCrossOriginIframes"
+)
+
+existing_wv2 = os.environ.get("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "")
+if "--disable-background-timer-throttling" not in existing_wv2:
+    os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = (existing_wv2 + " " + CHROMIUM_ANTI_THROTTLING_FLAGS).strip()
+
+existing_qt = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
+if "--disable-background-timer-throttling" not in existing_qt:
+    os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = (existing_qt + " " + CHROMIUM_ANTI_THROTTLING_FLAGS).strip()
+
 # Detection of available backends
 HAS_MAC_WEBKIT = False
 HAS_WIN_WEBVIEW2 = False
@@ -49,12 +65,29 @@ TAPPER_IN_PAGE_SCRIPT = """
     }
     window.__tiktokAutoTapperInstalled = true;
 
+    // --- Document Visibility & Focus Spoofing (Prevent background tab sleep/freeze) ---
+    try {
+        Object.defineProperty(document, 'hidden', {
+            get: function() { return false; },
+            configurable: true
+        });
+        Object.defineProperty(document, 'visibilityState', {
+            get: function() { return 'visible'; },
+            configurable: true
+        });
+        if (typeof document.hasFocus === 'function') {
+            document.hasFocus = function() { return true; };
+        }
+        document.dispatchEvent(new Event('visibilitychange'));
+    } catch(e) {}
+
     var state = {
         enabled: true,
         baseDelay: 100,
         randomization: 50,
         timerId: null,
-        cleanupTimerId: null
+        cleanupTimerId: null,
+        worker: null
     };
 
     var stats = {
@@ -91,7 +124,7 @@ TAPPER_IN_PAGE_SCRIPT = """
                             if (countMatch && countMatch[1]) {
                                 batchCount = parseInt(countMatch[1], 10) || 1;
                             } else if (args[1] && args[1].body && typeof args[1].body === 'string') {
-                                var bodyMatch = args[1].body.match(/count=(\d+)/i) || args[1].body.match(/"count"\s*:\s*(\d+)/i);
+                                var bodyMatch = args[1].body.match(/count=(\d+)/i) || args[1].body.match(/"count"\\s*:\\s*(\\d+)/i);
                                 if (bodyMatch && bodyMatch[1]) {
                                     batchCount = parseInt(bodyMatch[1], 10) || 1;
                                 }
@@ -163,7 +196,7 @@ TAPPER_IN_PAGE_SCRIPT = """
                             if (countMatch && countMatch[1]) {
                                 batchCount = parseInt(countMatch[1], 10) || 1;
                             } else if (body && typeof body === 'string') {
-                                var bodyMatch = body.match(/count=(\d+)/i) || body.match(/"count"\s*:\s*(\d+)/i);
+                                var bodyMatch = body.match(/count=(\d+)/i) || body.match(/"count"\\s*:\\s*(\\d+)/i);
                                 if (bodyMatch && bodyMatch[1]) {
                                     batchCount = parseInt(bodyMatch[1], 10) || 1;
                                 }
@@ -208,6 +241,72 @@ TAPPER_IN_PAGE_SCRIPT = """
         return Math.max(50, state.baseDelay + Math.floor(Math.random() * (state.randomization + 1)));
     }
 
+    // --- Unthrottled Web Worker Timer ---
+    // Browsers clamp background window.setTimeout to >= 1000ms.
+    // An inline Web Worker runs on an OS thread not subject to tab visibility timer clamping.
+    function ensureWorker() {
+        if (state.worker) return state.worker;
+        try {
+            var workerBlob = new Blob([
+                'var timer = null; ' +
+                'self.onmessage = function(e) { ' +
+                '    if (e.data && e.data.type === "schedule") { ' +
+                '        if (timer) clearTimeout(timer); ' +
+                '        timer = setTimeout(function() { ' +
+                '            self.postMessage("tick"); ' +
+                '        }, e.data.delay || 100); ' +
+                '    } else if (e.data && e.data.type === "stop") { ' +
+                '        if (timer) clearTimeout(timer); ' +
+                '        timer = null; ' +
+                '    } ' +
+                '};'
+            ], { type: 'application/javascript' });
+            var workerUrl = URL.createObjectURL(workerBlob);
+            var w = new Worker(workerUrl);
+            w.onmessage = function(e) {
+                if (e.data === 'tick') {
+                    if (state.enabled) {
+                        triggerTap();
+                    }
+                }
+            };
+            state.worker = w;
+            return w;
+        } catch(err) {
+            state.worker = null;
+            return null;
+        }
+    }
+
+    function scheduleNextTap(delay) {
+        if (!state.enabled) return;
+        var ms = typeof delay === 'number' ? delay : getNextDelay();
+        var w = ensureWorker();
+        if (w) {
+            try {
+                w.postMessage({ type: 'schedule', delay: ms });
+                return;
+            } catch(e) {
+                state.worker = null;
+            }
+        }
+        // Fallback to standard window.setTimeout if Worker is blocked (e.g. strict CSP)
+        if (state.timerId) clearTimeout(state.timerId);
+        state.timerId = setTimeout(triggerTap, ms);
+    }
+
+    function stopSchedule() {
+        if (state.worker) {
+            try {
+                state.worker.postMessage({ type: 'stop' });
+            } catch(e) {}
+        }
+        if (state.timerId) {
+            clearTimeout(state.timerId);
+            state.timerId = null;
+        }
+    }
+
     function triggerTap() {
         if (!state.enabled) return;
         stats.dispatched++;
@@ -239,9 +338,14 @@ TAPPER_IN_PAGE_SCRIPT = """
             }
         } catch(e) {}
 
+        // Proportional DOM cleanup every 30 taps to guarantee memory hygiene even in background tabs
+        if (stats.dispatched % 30 === 0) {
+            pruneDOM();
+        }
+
         // Schedule next tap with natural jitter
         if (state.enabled) {
-            state.timerId = setTimeout(triggerTap, getNextDelay());
+            scheduleNextTap(getNextDelay());
         }
     }
 
@@ -291,11 +395,13 @@ TAPPER_IN_PAGE_SCRIPT = """
         if (typeof rand === 'number') state.randomization = rand;
         if (enabled !== undefined) state.enabled = !!enabled;
 
-        if (state.timerId) clearTimeout(state.timerId);
+        stopSchedule();
         if (state.cleanupTimerId) clearInterval(state.cleanupTimerId);
 
+        ensureWorker();
+
         if (state.enabled) {
-            state.timerId = setTimeout(triggerTap, getNextDelay());
+            scheduleNextTap(getNextDelay());
         }
         // Run DOM pruning every 3 seconds
         state.cleanupTimerId = setInterval(pruneDOM, 3000);
@@ -308,20 +414,25 @@ TAPPER_IN_PAGE_SCRIPT = """
 
     window.__tiktokSetTapperEnabled = function(enabled) {
         state.enabled = !!enabled;
-        if (state.enabled && !state.timerId) {
-            state.timerId = setTimeout(triggerTap, getNextDelay());
-        } else if (!state.enabled && state.timerId) {
-            clearTimeout(state.timerId);
-            state.timerId = null;
+        if (state.enabled) {
+            ensureWorker();
+            scheduleNextTap(getNextDelay());
+        } else {
+            stopSchedule();
         }
     };
 
     window.__tiktokStopTapper = function() {
         state.enabled = false;
-        if (state.timerId) clearTimeout(state.timerId);
+        stopSchedule();
         if (state.cleanupTimerId) clearInterval(state.cleanupTimerId);
-        state.timerId = null;
         state.cleanupTimerId = null;
+    };
+
+    window.__tiktokTapperWakeup = function() {
+        if (state.enabled) {
+            triggerTap();
+        }
     };
 
     window.__tiktokGetStats = function() {
@@ -526,14 +637,14 @@ if HAS_MAC_WEBKIT:
             self.evaluate_js(js)
 
         def set_background_mode(self, is_background):
-            """Reduce video rendering and media buffer allocation in background tabs."""
+            """Reduce video rendering and media buffer allocation in background tabs without stalling player pipelines."""
             if is_background:
                 js = """
                 (function() {
                     if (document.getElementById('__autoliker_bg_mode__')) return;
                     var style = document.createElement('style');
                     style.id = '__autoliker_bg_mode__';
-                    style.textContent = 'video { visibility: hidden !important; height: 1px !important; width: 1px !important; position: absolute !important; }';
+                    style.textContent = 'video { opacity: 0.001 !important; pointer-events: none !important; }';
                     document.head.appendChild(style);
                 })();
                 """
@@ -560,6 +671,9 @@ if HAS_MAC_WEBKIT:
 
         def stop_tapper(self):
             self.evaluate_js("if (window.__tiktokStopTapper) window.__tiktokStopTapper();")
+
+        def wakeup_tapper(self):
+            self.evaluate_js("if (window.__tiktokTapperWakeup) window.__tiktokTapperWakeup();")
 
         def reload(self):
             if getattr(self, 'wk', None):
@@ -750,15 +864,10 @@ if HAS_WIN_WEBVIEW2:
                     if (document.getElementById('__autoliker_bg_mode__')) return;
                     var style = document.createElement('style');
                     style.id = '__autoliker_bg_mode__';
-                    style.textContent = 'video { visibility: hidden !important; height: 1px !important; width: 1px !important; position: absolute !important; }';
+                    style.textContent = 'video { opacity: 0.001 !important; pointer-events: none !important; }';
                     document.head.appendChild(style);
                 })();
                 """
-                if self._core_wv2:
-                    try:
-                        self._core_wv2.MemoryUsageTargetLevel = 1  # Low
-                    except Exception:
-                        pass
             else:
                 js = """
                 (function() {
@@ -766,11 +875,6 @@ if HAS_WIN_WEBVIEW2:
                     if (el) el.remove();
                 })();
                 """
-                if self._core_wv2:
-                    try:
-                        self._core_wv2.MemoryUsageTargetLevel = 0  # Normal
-                    except Exception:
-                        pass
             self.evaluate_js(js)
 
         def inject_in_page_tapper(self, base_ms=100, rand_ms=50, enabled=True):
@@ -786,6 +890,9 @@ if HAS_WIN_WEBVIEW2:
 
         def stop_tapper(self):
             self.evaluate_js("if (window.__tiktokStopTapper) window.__tiktokStopTapper();")
+
+        def wakeup_tapper(self):
+            self.evaluate_js("if (window.__tiktokTapperWakeup) window.__tiktokTapperWakeup();")
 
         def reload(self):
             if self.wv2:
@@ -930,15 +1037,10 @@ if HAS_QT_WEBENGINE:
                     if (document.getElementById('__autoliker_bg_mode__')) return;
                     var style = document.createElement('style');
                     style.id = '__autoliker_bg_mode__';
-                    style.textContent = 'video { visibility: hidden !important; height: 1px !important; width: 1px !important; position: absolute !important; }';
+                    style.textContent = 'video { opacity: 0.001 !important; pointer-events: none !important; }';
                     document.head.appendChild(style);
                 })();
                 """
-                if hasattr(QWebEnginePage, 'LifecycleState'):
-                    try:
-                        self.web.page().setLifecycleState(QWebEnginePage.LifecycleState.Passive)
-                    except Exception:
-                        pass
             else:
                 js = """
                 (function() {
@@ -946,11 +1048,6 @@ if HAS_QT_WEBENGINE:
                     if (el) el.remove();
                 })();
                 """
-                if hasattr(QWebEnginePage, 'LifecycleState'):
-                    try:
-                        self.web.page().setLifecycleState(QWebEnginePage.LifecycleState.Active)
-                    except Exception:
-                        pass
             self.evaluate_js(js)
 
         def inject_in_page_tapper(self, base_ms=100, rand_ms=50, enabled=True):
@@ -966,6 +1063,9 @@ if HAS_QT_WEBENGINE:
 
         def stop_tapper(self):
             self.evaluate_js("if (window.__tiktokStopTapper) window.__tiktokStopTapper();")
+
+        def wakeup_tapper(self):
+            self.evaluate_js("if (window.__tiktokTapperWakeup) window.__tiktokTapperWakeup();")
 
         def reload(self):
             if self.web:
@@ -1116,6 +1216,10 @@ class UniversalWebView(QWidget):
 
     def stop_tapper(self):
         self._engine.stop_tapper()
+
+    def wakeup_tapper(self):
+        if getattr(self, '_engine', None) and hasattr(self._engine, 'wakeup_tapper'):
+            self._engine.wakeup_tapper()
 
     def get_tapper_stats(self, callback):
         """Query live in-page tapper stats (dispatched, verified, failed, roomLikes, uptimeSeconds)."""
