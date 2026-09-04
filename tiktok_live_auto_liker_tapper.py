@@ -966,6 +966,11 @@ class SyncSettingsDialog(QDialog):
         int_row.addStretch()
         layout.addLayout(int_row)
 
+        self.sync_cookies_cb = QCheckBox("Sync TikTok login session & cookies (authenticated across all devices)")
+        self.sync_cookies_cb.setChecked(bool(sync_cfg.get("sync_cookies", True)))
+        self.sync_cookies_cb.setStyleSheet("color: #e0e0e0; font-size: 8.5pt;")
+        layout.addWidget(self.sync_cookies_cb)
+
         self.status_lbl = QLabel(getattr(self.sync_manager, 'last_sync_status', 'Not synced yet'))
         self.status_lbl.setStyleSheet("color: #8c96a8; font-size: 8pt; padding: 4px;")
         self.status_lbl.setWordWrap(True)
@@ -1054,7 +1059,11 @@ class SyncSettingsDialog(QDialog):
         sync_cfg["rest_url"] = self.rest_url_edit.text().strip()
         sync_cfg["rest_api_key"] = self.rest_key_edit.text().strip()
         sync_cfg["auto_sync_interval_s"] = self.interval_combo.currentData()
+        sync_cfg["sync_cookies"] = self.sync_cookies_cb.isChecked()
         SettingsManager.save_settings(self.settings)
+
+        if self.sync_cookies_cb.isChecked() and self.sync_manager:
+            UniversalWebView.extract_all_cookies(lambda cks: cks and self.sync_manager.update_local_cookies(cks))
 
     def _save_and_close(self):
         self._apply_to_settings()
@@ -1094,13 +1103,27 @@ class TikTokAutoLikerApp(QMainWindow):
         self.sync_mgr = SyncManager(data_dir=DATA_DIR, parent=self)
         self.sync_mgr.sync_completed.connect(self._on_sync_completed)
         self.sync_mgr.sync_failed.connect(self._on_sync_failed)
+        self.sync_mgr.cookies_updated.connect(self._on_cookies_received)
         self._sync_dialog = None
+
+        # Restore saved cookies if present
+        saved_cookies, _ = self.sync_mgr._read_cookies()
+        if saved_cookies:
+            UniversalWebView.inject_cookies_into_profile(saved_cookies, USER_DATA_DIR)
 
         self._apply_stylesheet()
         self._setup_ui()
         self._setup_webview_engine()
         QTimer.singleShot(2000, self._initial_sync)
         QTimer.singleShot(3000, self.check_for_updates)
+
+    def _on_cookies_received(self, cookies):
+        if cookies:
+            UniversalWebView.inject_cookies_into_profile(cookies, USER_DATA_DIR)
+
+    def _on_cookies_extracted(self, cookies):
+        if cookies and hasattr(self, 'sync_mgr'):
+            self.sync_mgr.update_local_cookies(cookies)
 
     def _open_kofi(self):
         QDesktopServices.openUrl(QUrl("https://ko-fi.com/K3K314GUP?ref=tiktok_live_auto_liker_app"))
@@ -1812,6 +1835,7 @@ class TikTokAutoLikerApp(QMainWindow):
 
         self._fallback_tab_selection()
         self._start_monitoring()
+        UniversalWebView.extract_all_cookies(self._on_cookies_extracted)
 
     def _reveal_login_tab(self):
         if self.is_logged_in or getattr(self, 'login_webview', None) is None:
@@ -1861,9 +1885,33 @@ class TikTokAutoLikerApp(QMainWindow):
 
     def sign_out(self):
         msg_box = QMessageBox(self)
-        msg_box.setWindowTitle("Sign Out")
+        msg_box.setWindowTitle("Sign Out of TikTok")
         msg_box.setText("Are you sure you want to sign out of TikTok?")
+        msg_box.setInformativeText("This will close active streams and clear the session.")
         msg_box.setIcon(QMessageBox.Icon.Question)
+
+        msg_box.setStyleSheet("""
+            QMessageBox {
+                background-color: #1a1e28;
+                color: #ffffff;
+            }
+            QLabel {
+                color: #ffffff;
+                font-size: 10pt;
+            }
+            QPushButton {
+                background-color: #252c3c;
+                color: #ffffff;
+                border: 1px solid #364057;
+                border-radius: 6px;
+                padding: 6px 16px;
+                min-width: 65px;
+                font-size: 9pt;
+            }
+            QPushButton:hover {
+                background-color: #2f384d;
+            }
+        """)
 
         yes_btn = msg_box.addButton(QMessageBox.StandardButton.Yes)
         no_btn = msg_box.addButton(QMessageBox.StandardButton.No)
@@ -1880,6 +1928,8 @@ class TikTokAutoLikerApp(QMainWindow):
         self._has_handled_login = False
         if hasattr(self, 'signout_btn'):
             self.signout_btn.setVisible(False)
+        if hasattr(self, 'sync_mgr'):
+            self.sync_mgr.clear_local_cookies()
 
         # Stop monitoring and clean up checker
         if hasattr(self, 'check_timer') and self.check_timer.isActive():

@@ -46,11 +46,120 @@ def get_device_name() -> str:
         return sys.platform
 
 
+def parse_cookie_input(raw: str) -> list:
+    """
+    Parse pasted cookie input into standardized TikTok cookie dictionaries.
+    Supports:
+    - JSON array of cookie objects (from Cookie-Editor, EditThisCookie, etc.)
+    - Key-value JSON dictionary
+    - Raw HTTP 'Cookie:' header string (e.g. 'sessionid=...; sid_tt=...')
+    - Plain raw sessionid string (auto-generates sessionid, sessionid_ss, and sid_tt)
+    """
+    if not raw or not isinstance(raw, str):
+        return []
+
+    text = raw.strip()
+    if not text:
+        return []
+
+    # Case 1: JSON array or object
+    if (text.startswith("[") and text.endswith("]")) or (text.startswith("{") and text.endswith("}")):
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, list):
+                cookies = []
+                for item in parsed:
+                    if isinstance(item, dict) and item.get("name") and item.get("value"):
+                        cookies.append({
+                            "name": str(item["name"]).strip(),
+                            "value": str(item["value"]).strip(),
+                            "domain": str(item.get("domain") or ".tiktok.com"),
+                            "path": str(item.get("path") or "/"),
+                            "secure": bool(item.get("secure", True)),
+                            "http_only": bool(item.get("http_only", item.get("httpOnly", True))),
+                            "expires": float(item.get("expirationDate", item.get("expires", 0.0)) or 0.0) or None
+                        })
+                if cookies:
+                    return cookies
+            elif isinstance(parsed, dict):
+                if "cookies" in parsed and isinstance(parsed["cookies"], list):
+                    return parse_cookie_input(json.dumps(parsed["cookies"]))
+                # Key-value mapping
+                cookies = []
+                for k, v in parsed.items():
+                    if isinstance(v, (str, int, float)):
+                        cookies.append({
+                            "name": str(k).strip(),
+                            "value": str(v).strip(),
+                            "domain": ".tiktok.com",
+                            "path": "/",
+                            "secure": True,
+                            "http_only": True
+                        })
+                if cookies:
+                    return cookies
+        except Exception:
+            pass
+
+    # Case 2: HTTP Cookie header format: name=val; name2=val2
+    if "=" in text and (";" in text or len(text.split("=")) == 2):
+        cookies = []
+        pairs = text.split(";")
+        for pair in pairs:
+            if "=" in pair:
+                parts = pair.split("=", 1)
+                name = parts[0].strip()
+                val = parts[1].strip()
+                if name:
+                    cookies.append({
+                        "name": name,
+                        "value": val,
+                        "domain": ".tiktok.com",
+                        "path": "/",
+                        "secure": True,
+                        "http_only": True
+                    })
+        if cookies:
+            return cookies
+
+    # Case 3: Plain sessionid token (alphanumeric string)
+    token = text.strip().replace("\"", "").replace("'", "")
+    if token:
+        return [
+            {
+                "name": "sessionid",
+                "value": token,
+                "domain": ".tiktok.com",
+                "path": "/",
+                "secure": True,
+                "http_only": True
+            },
+            {
+                "name": "sessionid_ss",
+                "value": token,
+                "domain": ".tiktok.com",
+                "path": "/",
+                "secure": True,
+                "http_only": True
+            },
+            {
+                "name": "sid_tt",
+                "value": token,
+                "domain": ".tiktok.com",
+                "path": "/",
+                "secure": True,
+                "http_only": True
+            }
+        ]
+
+    return []
+
+
 class SyncBundle:
     """Represents the serializable sync state."""
     VERSION = 1
 
-    def __init__(self, settings: dict = None, favorites: dict = None, tombstones: dict = None, device_name: str = None):
+    def __init__(self, settings: dict = None, favorites: dict = None, tombstones: dict = None, device_name: str = None, cookies: list = None, cookies_updated_at: float = 0.0):
         self.version = self.VERSION
         self.device_name = device_name or get_device_name()
         self.timestamp = time.time()
@@ -78,6 +187,9 @@ class SyncBundle:
                     }
         # Tombstones: username -> deleted_at timestamp
         self.tombstones: Dict[str, float] = tombstones or {}
+        # TikTok session cookies
+        self.cookies: list = cookies or []
+        self.cookies_updated_at: float = float(cookies_updated_at or 0.0)
 
     def to_dict(self) -> dict:
         return {
@@ -86,7 +198,9 @@ class SyncBundle:
             "timestamp": self.timestamp,
             "settings": self.settings,
             "favorites": self.favorites,
-            "tombstones": self.tombstones
+            "tombstones": self.tombstones,
+            "cookies": self.cookies,
+            "cookies_updated_at": self.cookies_updated_at
         }
 
     @classmethod
@@ -95,7 +209,9 @@ class SyncBundle:
             settings=data.get("settings"),
             favorites=data.get("favorites"),
             tombstones=data.get("tombstones"),
-            device_name=data.get("device_name")
+            device_name=data.get("device_name"),
+            cookies=data.get("cookies"),
+            cookies_updated_at=data.get("cookies_updated_at", 0.0)
         )
         b.timestamp = float(data.get("timestamp", time.time()))
         return b
@@ -103,7 +219,7 @@ class SyncBundle:
 
 def merge_bundles(local: SyncBundle, remote: SyncBundle) -> Tuple[SyncBundle, bool, bool]:
     """
-    Merge two sync bundles using Last-Write-Wins (LWW) with tombstones.
+    Merge two sync bundles using Last-Write-Wins (LWW) with tombstones and cookie propagation.
     Returns: (merged_bundle, local_changed, remote_changed)
     """
     merged = SyncBundle(device_name=local.device_name)
@@ -182,6 +298,21 @@ def merge_bundles(local: SyncBundle, remote: SyncBundle) -> Tuple[SyncBundle, bo
         merged.settings = dict(local.settings)
         if loc_s_time > rem_s_time:
             remote_changed = True
+
+    # 4. Merge cookies (higher cookies_updated_at wins)
+    loc_c_time = float(local.cookies_updated_at or 0.0)
+    rem_c_time = float(remote.cookies_updated_at or 0.0)
+    if rem_c_time > loc_c_time and remote.cookies:
+        merged.cookies = list(remote.cookies)
+        merged.cookies_updated_at = rem_c_time
+        local_changed = True
+    elif loc_c_time > rem_c_time and local.cookies:
+        merged.cookies = list(local.cookies)
+        merged.cookies_updated_at = loc_c_time
+        remote_changed = True
+    else:
+        merged.cookies = list(local.cookies or remote.cookies or [])
+        merged.cookies_updated_at = max(loc_c_time, rem_c_time)
 
     merged.timestamp = time.time()
     return merged, local_changed, remote_changed
@@ -398,6 +529,27 @@ class RestSyncBackend(BaseSyncBackend):
             return False, f"REST push error: {e}"
 
 
+def create_backend(sync_cfg: dict) -> Optional[BaseSyncBackend]:
+    """Helper to instantiate a sync backend from a configuration dictionary."""
+    if not sync_cfg or not isinstance(sync_cfg, dict):
+        return None
+    method = sync_cfg.get("method", "folder")
+    if method == "folder":
+        return FolderSyncBackend(sync_cfg.get("folder_path", ""))
+    elif method == "webdav":
+        return WebDAVSyncBackend(
+            server_url=sync_cfg.get("webdav_url", ""),
+            username=sync_cfg.get("webdav_username", ""),
+            password=sync_cfg.get("webdav_password", "")
+        )
+    elif method == "rest":
+        return RestSyncBackend(
+            endpoint_url=sync_cfg.get("rest_url", ""),
+            api_key=sync_cfg.get("rest_api_key", "")
+        )
+    return None
+
+
 class SyncManager(QObject):
     """
     Coordinates local state persistence, conflict-free merging,
@@ -405,6 +557,7 @@ class SyncManager(QObject):
     """
     sync_completed = pyqtSignal(str, bool)  # (status_message, has_local_changes)
     sync_failed = pyqtSignal(str)          # (error_message)
+    cookies_updated = pyqtSignal(list)      # (cookies_list)
 
     def __init__(self, data_dir: str, parent=None):
         super().__init__(parent)
@@ -412,6 +565,7 @@ class SyncManager(QObject):
         self.favorites_file = os.path.join(self.data_dir, "favorites.json")
         self.settings_file = os.path.join(self.data_dir, "settings.json")
         self.sync_state_file = os.path.join(self.data_dir, "sync_state.json")
+        self.cookies_file = os.path.join(self.data_dir, "cookies.json")
 
         self.lock = threading.Lock()
         self._sync_timer: Optional[threading.Timer] = None
@@ -434,28 +588,13 @@ class SyncManager(QObject):
             settings = self._read_settings()
             sync_cfg = settings.get("sync", {})
             enabled = bool(sync_cfg.get("enabled", False))
-            method = sync_cfg.get("method", "folder")  # folder | webdav | rest
 
             if not enabled:
                 self.backend = None
                 self._stop_sync_timer()
                 return
 
-            if method == "folder":
-                self.backend = FolderSyncBackend(sync_cfg.get("folder_path", ""))
-            elif method == "webdav":
-                self.backend = WebDAVSyncBackend(
-                    server_url=sync_cfg.get("webdav_url", ""),
-                    username=sync_cfg.get("webdav_username", ""),
-                    password=sync_cfg.get("webdav_password", "")
-                )
-            elif method == "rest":
-                self.backend = RestSyncBackend(
-                    endpoint_url=sync_cfg.get("rest_url", ""),
-                    api_key=sync_cfg.get("rest_api_key", "")
-                )
-            else:
-                self.backend = None
+            self.backend = create_backend(sync_cfg)
 
             interval = max(15, int(sync_cfg.get("auto_sync_interval_s", 60)))
             self._start_sync_timer(interval)
@@ -523,6 +662,19 @@ class SyncManager(QObject):
                 pass
         return {}
 
+    def _read_cookies(self) -> Tuple[list, float]:
+        if os.path.exists(self.cookies_file):
+            try:
+                with open(self.cookies_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, list):
+                        return data, os.path.getmtime(self.cookies_file)
+                    elif isinstance(data, dict):
+                        return data.get("cookies", []), float(data.get("updated_at", 0.0))
+            except Exception:
+                pass
+        return [], 0.0
+
     def _write_settings(self, settings: dict):
         try:
             with open(self.settings_file, "w", encoding="utf-8") as f:
@@ -537,14 +689,46 @@ class SyncManager(QObject):
         except Exception:
             pass
 
+    def _write_cookies(self, cookies: list, updated_at: float = None):
+        if updated_at is None:
+            updated_at = time.time()
+        try:
+            with open(self.cookies_file, "w", encoding="utf-8") as f:
+                json.dump({
+                    "updated_at": updated_at,
+                    "cookies": cookies
+                }, f, indent=2)
+        except Exception:
+            pass
+
+    def update_local_cookies(self, cookies: list, updated_at: float = None):
+        """Update cookies locally, write to cookies.json, emit signal, and schedule a cloud sync push."""
+        if updated_at is None:
+            updated_at = time.time()
+        with self.lock:
+            self._write_cookies(cookies, updated_at)
+        self.cookies_updated.emit(cookies)
+        self.schedule_debounced_push()
+
+    def clear_local_cookies(self):
+        """Clear local cookies and schedule cloud push."""
+        now = time.time()
+        with self.lock:
+            self._write_cookies([], now)
+        self.cookies_updated.emit([])
+        self.schedule_debounced_push()
+
     def get_local_bundle(self) -> SyncBundle:
         """Create a SyncBundle from current local disk files."""
         settings = self._read_settings()
         favs = self._read_favorites()
+        cookies, cookies_updated_at = self._read_cookies()
         return SyncBundle(
             settings=settings,
             favorites=favs,
-            tombstones=self.tombstones
+            tombstones=self.tombstones,
+            cookies=cookies,
+            cookies_updated_at=cookies_updated_at
         )
 
     # --- Synchronization Execution ---
@@ -605,6 +789,11 @@ class SyncManager(QObject):
                 self.tombstones = merged_bundle.tombstones
                 self._save_sync_state()
 
+                # Update cookies if remote provided newer cookies
+                if merged_bundle.cookies != local_bundle.cookies:
+                    self._write_cookies(merged_bundle.cookies, merged_bundle.cookies_updated_at)
+                    self.cookies_updated.emit(merged_bundle.cookies)
+
             # 5. If remote needs updates, push merged bundle back to remote
             if remote_changed:
                 push_ok, push_err = self.backend.push_bundle(merged_bundle)
@@ -615,8 +804,9 @@ class SyncManager(QObject):
 
             self.last_sync_time = time.time()
             fav_count = len(merged_bundle.favorites)
+            cookie_count = len(merged_bundle.cookies)
             if local_changed and remote_changed:
-                msg = f"Synced & merged {fav_count} creators (bidirectional)"
+                msg = f"Synced & merged {fav_count} creators, {cookie_count} cookies (bidirectional)"
             elif local_changed:
                 msg = f"Synced: pulled {fav_count} creators from cloud"
             elif remote_changed:

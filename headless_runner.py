@@ -161,6 +161,13 @@ class HeadlessServerManager(QObject):
         self.sync_mgr = SyncManager(data_dir=DATA_DIR, parent=self)
         self.sync_mgr.sync_completed.connect(self._on_sync_completed)
         self.sync_mgr.sync_failed.connect(self._on_sync_failed)
+        self.sync_mgr.cookies_updated.connect(self._on_cookies_updated)
+
+        # Restore saved cookies if present
+        saved_cookies, _ = self.sync_mgr._read_cookies()
+        if saved_cookies:
+            UniversalWebView.inject_cookies_into_profile(saved_cookies, USER_DATA_DIR)
+            self.log(f"[AUTH] Injected {len(saved_cookies)} saved TikTok cookies into browser profile.")
 
         # 2. Local State
         self.favorites: Dict[str, Any] = self._load_favorites()
@@ -310,6 +317,13 @@ class HeadlessServerManager(QObject):
     def _on_sync_failed(self, err: str):
         self.log(f"[SYNC ERROR] {err}")
 
+    def _on_cookies_updated(self, cookies: list):
+        UniversalWebView.inject_cookies_into_profile(cookies, USER_DATA_DIR)
+        if cookies:
+            self.log(f"[AUTH] Received updated session ({len(cookies)} cookies). Profile updated.")
+        else:
+            self.log("[AUTH] TikTok session cleared.")
+
     # --- CLI Status ---
 
     def _print_cli_status(self):
@@ -413,6 +427,74 @@ class HeadlessServerManager(QObject):
         self.log("[WEB] Manual sync triggered from Web Dashboard.")
         ok, msg = self.sync_mgr.sync_now()
         return msg
+
+    def get_sync_config(self) -> dict:
+        s = self.sync_mgr._read_settings()
+        sync_cfg = s.get("sync", {})
+        return {
+            "enabled": bool(sync_cfg.get("enabled", False)),
+            "method": sync_cfg.get("method", "folder"),
+            "folder_path": sync_cfg.get("folder_path", ""),
+            "webdav_url": sync_cfg.get("webdav_url", ""),
+            "webdav_username": sync_cfg.get("webdav_username", ""),
+            "webdav_password": sync_cfg.get("webdav_password", ""),
+            "rest_url": sync_cfg.get("rest_url", ""),
+            "rest_api_key": sync_cfg.get("rest_api_key", ""),
+            "auto_sync_interval_s": int(sync_cfg.get("auto_sync_interval_s", 60)),
+            "sync_cookies": bool(sync_cfg.get("sync_cookies", True)),
+            "last_sync_time": self.sync_mgr.last_sync_time,
+            "last_sync_status": self.sync_mgr.last_sync_status
+        }
+
+    def save_sync_config(self, cfg: dict) -> Tuple[bool, str]:
+        s = self.sync_mgr._read_settings()
+        s["sync"] = cfg
+        self.sync_mgr._write_settings(s)
+        self.sync_mgr.reload_config()
+        self.log(f"[WEB] Sync configuration saved (Method: {cfg.get('method')}, Enabled: {cfg.get('enabled')})")
+        return True, "Sync settings saved successfully"
+
+    def test_sync_config(self, cfg: dict) -> Tuple[bool, str]:
+        from sync_manager import create_backend
+        backend = create_backend(cfg)
+        if not backend:
+            return False, "Could not create backend for the specified method."
+        return backend.test_connection()
+
+    def get_cookie_status(self) -> dict:
+        cookies, updated_at = self.sync_mgr._read_cookies()
+        session_val = ""
+        for c in cookies:
+            if c.get("name") == "sessionid":
+                session_val = c.get("value", "")
+                break
+        is_auth = bool(session_val)
+        masked = ""
+        if session_val:
+            if len(session_val) > 8:
+                masked = session_val[:4] + "***" + session_val[-4:]
+            else:
+                masked = "***"
+        return {
+            "is_authenticated": is_auth,
+            "cookie_count": len(cookies),
+            "session_masked": masked,
+            "updated_at": updated_at
+        }
+
+    def import_cookies(self, raw_input: str) -> Tuple[bool, str, int]:
+        from sync_manager import parse_cookie_input
+        cookies = parse_cookie_input(raw_input)
+        if not cookies:
+            return False, "No valid TikTok cookies or session ID found in input.", 0
+        self.sync_mgr.update_local_cookies(cookies)
+        self.log(f"[WEB] Imported {len(cookies)} TikTok cookies. Session authenticated!")
+        return True, f"Successfully imported {len(cookies)} cookies!", len(cookies)
+
+    def clear_cookies(self) -> Tuple[bool, str]:
+        self.sync_mgr.clear_local_cookies()
+        self.log("[WEB] TikTok session cleared.")
+        return True, "Session cleared successfully"
 
     def get_recent_logs(self) -> list:
         return [f"[{entry['time']}] {entry['message']}" for entry in self.logs]

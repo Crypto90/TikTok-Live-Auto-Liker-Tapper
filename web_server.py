@@ -595,6 +595,235 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             transform: translateY(0);
         }
 
+        /* Form Controls & Inputs */
+        .form-input {
+            width: 100%;
+            background: var(--bg-elevated);
+            border: 1px solid var(--border-subtle);
+            border-radius: var(--radius-sm);
+            padding: 10px 14px;
+            color: #fff;
+            font-family: inherit;
+            font-size: 0.9rem;
+            outline: none;
+            transition: var(--transition);
+        }
+        .form-input:focus {
+            border-color: var(--secondary);
+            box-shadow: 0 0 10px var(--secondary-glow);
+        }
+        .form-hint {
+            font-size: 0.75rem;
+            color: var(--text-dim);
+            line-height: 1.4;
+            margin-top: 4px;
+        }
+
+        /* Sync Provider Selector */
+        .sync-provider-nav {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 1rem;
+            flex-wrap: wrap;
+        }
+        .provider-btn {
+            flex: 1;
+            min-width: 130px;
+            background: var(--bg-elevated);
+            border: 1px solid var(--border-subtle);
+            border-radius: var(--radius-sm);
+            padding: 10px 12px;
+            color: var(--text-muted);
+            font-size: 0.82rem;
+            font-weight: 600;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            transition: var(--transition);
+        }
+        .provider-btn:hover {
+            color: #fff;
+            border-color: var(--secondary);
+        }
+        .provider-btn.active {
+            background: rgba(37, 244, 238, 0.1);
+            border-color: var(--secondary);
+            color: var(--secondary);
+            box-shadow: 0 0 12px var(--secondary-glow);
+        }
+
+        /* Toggle switch */
+        .switch-container {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 10px 0;
+            border-bottom: 1px solid var(--border-subtle);
+            margin-bottom: 1rem;
+        }
+        .switch-lbl {
+            font-size: 0.9rem;
+            font-weight: 600;
+            color: #fff;
+        }
+        .switch {
+            position: relative;
+            display: inline-block;
+            width: 44px;
+            height: 24px;
+        }
+        .switch input { opacity: 0; width: 0; height: 0; }
+        .slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background-color: var(--bg-elevated);
+            border: 1px solid var(--border-subtle);
+            transition: .3s;
+            border-radius: 24px;
+        }
+        .slider:before {
+            position: absolute;
+            content: "";
+            height: 16px;
+            width: 16px;
+            left: 3px;
+            bottom: 3px;
+            background-color: #8c96a8;
+            transition: .3s;
+            border-radius: 50%;
+        }
+        input:checked + .slider {
+            background-color: var(--primary);
+            border-color: var(--primary);
+            box-shadow: 0 0 10px var(--primary-glow);
+        }
+        input:checked + .slider:before {
+            transform: translateX(20px);
+            background-color: #fff;
+        }
+
+        /* Status alerts */
+        .status-alert {
+            padding: 10px 14px;
+            border-radius: var(--radius-sm);
+            font-size: 0.82rem;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-top: 10px;
+        }
+        .status-alert.success {
+            background: rgba(0, 230, 118, 0.12);
+            border: 1px solid var(--green);
+            color: var(--green);
+        }
+        .status-alert.error {
+            background: rgba(254, 44, 85, 0.12);
+            border: 1px solid var(--primary);
+            color: var(--primary);
+        }
+
+        /* Cookie & Auth Badges */
+        .auth-card {
+            background: var(--bg-elevated);
+            border: 1px solid var(--border-subtle);
+            border-radius: var(--radius-sm);
+            padding: 1rem;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+        .auth-status-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        .auth-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 0.78rem;
+            font-weight: 700;
+        }
+        .auth-pill.logged-in {
+            background: rgba(0, 230, 118, 0.15);
+            border: 1px solid var(--green);
+            color: var(--green);
+            box-shadow: 0 0 10px var(--green-glow);
+        }
+        .auth-pill.guest {
+            background: rgba(255, 171, 0, 0.15);
+            border: 1px solid #ffab00;
+            color: #ffab00;
+        }
+
+        /* Modal dialog */
+        .modal-overlay {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0, 0, 0, 0.75);
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
+            z-index: 1000;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            padding: 1.5rem;
+        }
+        .modal-overlay.open { display: flex; }
+        .modal-card {
+            background: var(--bg-surface);
+            border: 1px solid var(--border-subtle);
+            border-radius: var(--radius-md);
+            width: 100%;
+            max-width: 540px;
+            box-shadow: 0 20px 50px rgba(0,0,0,0.7);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            animation: modalPop 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+        @keyframes modalPop {
+            0% { transform: scale(0.95); opacity: 0; }
+            100% { transform: scale(1); opacity: 1; }
+        }
+        .modal-header {
+            padding: 1.25rem 1.5rem;
+            border-bottom: 1px solid var(--border-subtle);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        .modal-title { font-size: 1.05rem; font-weight: 700; color: #fff; }
+        .modal-close {
+            background: none; border: none; font-size: 1.25rem; color: var(--text-dim); cursor: pointer;
+        }
+        .modal-close:hover { color: #fff; }
+        .modal-body { padding: 1.25rem 1.5rem; display: flex; flex-direction: column; gap: 12px; }
+        .modal-footer {
+            padding: 1rem 1.5rem;
+            border-top: 1px solid var(--border-subtle);
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            gap: 10px;
+            background: rgba(0, 0, 0, 0.15);
+        }
+        .btn-danger {
+            background: rgba(254, 44, 85, 0.15);
+            border: 1px solid var(--primary);
+            color: var(--primary);
+        }
+        .btn-danger:hover {
+            background: var(--primary);
+            color: #fff;
+        }
+
         @media (max-width: 768px) {
             header { padding: 0.75rem 1rem; }
             main { padding: 1rem; }
@@ -682,6 +911,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <!-- Tab 3: Settings & Sync -->
         <div class="tab-pane" id="pane-settings">
             <div class="settings-grid">
+                <!-- 1. Auto-Tapper Rates -->
                 <div class="card">
                     <div class="card-header">
                         <div class="card-title">⚡ Auto-Tapper Rates</div>
@@ -703,18 +933,122 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                     <button class="btn btn-primary" id="saveSpeedBtn" onclick="saveSettings()">Save Rates</button>
                 </div>
 
+                <!-- 2. TikTok Authentication & Session -->
                 <div class="card">
                     <div class="card-header">
-                        <div class="card-title">☁️ Multi-Device Sync</div>
+                        <div class="card-title">🍪 TikTok Authentication & Session</div>
                     </div>
-                    <div class="form-group">
-                        <div class="form-label">Sync Status</div>
-                        <div id="syncDetailText" style="font-size: 0.85rem; color: var(--text-muted);">
-                            Checking sync status...
+                    <div class="auth-card">
+                        <div class="auth-status-row">
+                            <span style="font-size: 0.85rem; font-weight: 600; color: var(--text-muted);">Session Status</span>
+                            <span class="auth-pill guest" id="authStatusPill">○ Guest Mode</span>
+                        </div>
+                        <div id="authDetailsText" style="font-size: 0.8rem; color: var(--text-muted); line-height: 1.5;">
+                            No authenticated session loaded. Tapping operates in guest mode.
+                        </div>
+                        <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px;">
+                            <button class="btn btn-primary" onclick="openCookieModal()">🍪 Import / Paste Cookies</button>
+                            <button class="btn btn-danger" id="clearSessionBtn" onclick="clearCookies()" style="display: none;">Sign Out / Clear</button>
                         </div>
                     </div>
-                    <div style="display: flex; gap: 10px; margin-top: 1rem;">
-                        <button class="btn btn-primary" id="manualSyncBtn" onclick="triggerSync()">Sync Now</button>
+                </div>
+
+                <!-- 3. Multi-Device Cloud Sync -->
+                <div class="card" style="grid-column: 1 / -1;">
+                    <div class="card-header">
+                        <div class="card-title">☁️ Multi-Device Cloud Sync</div>
+                        <div id="syncBadgeHeader" style="font-size: 0.8rem; color: var(--text-muted);">Checking status...</div>
+                    </div>
+
+                    <div class="switch-container">
+                        <div>
+                            <div class="switch-lbl">Enable Automatic Cloud Sync</div>
+                            <div style="font-size: 0.78rem; color: var(--text-muted); margin-top: 2px;">
+                                Keeps favorites, settings, and session cookies in sync across macOS, Windows, and Linux.
+                            </div>
+                        </div>
+                        <label class="switch">
+                            <input type="checkbox" id="syncEnabledToggle" onchange="onSyncToggleChange()">
+                            <span class="slider"></span>
+                        </label>
+                    </div>
+
+                    <div id="syncConfigSection">
+                        <div class="form-group">
+                            <label class="form-label">Sync Method</label>
+                            <div class="sync-provider-nav">
+                                <button type="button" class="provider-btn active" id="btnMethodFolder" onclick="selectSyncMethod('folder')">📁 Shared Folder / Cloud Drive</button>
+                                <button type="button" class="provider-btn" id="btnMethodWebdav" onclick="selectSyncMethod('webdav')">🌐 WebDAV Remote Server</button>
+                                <button type="button" class="provider-btn" id="btnMethodRest" onclick="selectSyncMethod('rest')">⚡ REST Sync Server</button>
+                            </div>
+                        </div>
+
+                        <!-- Provider 1: Folder -->
+                        <div id="secFolder">
+                            <div class="form-group">
+                                <label class="form-label">Directory Path on Server</label>
+                                <input type="text" class="form-input" id="syncFolderPath" placeholder="/mnt/google-drive/tiktok-sync or /data/sync">
+                                <div class="form-hint">
+                                    💡 Point this to your Google Drive, Dropbox, Nextcloud local mount, Syncthing directory, or server folder.
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Provider 2: WebDAV -->
+                        <div id="secWebDAV" style="display: none;">
+                            <div class="form-group">
+                                <label class="form-label">WebDAV Server Endpoint URL</label>
+                                <input type="text" class="form-input" id="syncWebdavUrl" placeholder="https://nextcloud.example.com/remote.php/dav/files/user/tiktok_sync">
+                            </div>
+                            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+                                <div class="form-group">
+                                    <label class="form-label">Username</label>
+                                    <input type="text" class="form-input" id="syncWebdavUser" placeholder="WebDAV Username">
+                                </div>
+                                <div class="form-group">
+                                    <label class="form-label">Password / App Token</label>
+                                    <input type="password" class="form-input" id="syncWebdavPass" placeholder="Password or App Token">
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Provider 3: REST -->
+                        <div id="secREST" style="display: none;">
+                            <div class="form-group">
+                                <label class="form-label">REST Server URL</label>
+                                <input type="text" class="form-input" id="syncRestUrl" placeholder="http://192.168.1.50:8081">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">API Key (Optional)</label>
+                                <input type="password" class="form-input" id="syncRestKey" placeholder="Sync server API key if required">
+                            </div>
+                        </div>
+
+                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 10px;">
+                            <div class="form-group">
+                                <label class="form-label">Auto-Sync Polling Interval</label>
+                                <select class="form-select" id="syncIntervalSelect">
+                                    <option value="30">Every 30 seconds</option>
+                                    <option value="60" selected>Every 60 seconds (Recommended)</option>
+                                    <option value="120">Every 2 minutes</option>
+                                    <option value="300">Every 5 minutes</option>
+                                </select>
+                            </div>
+                            <div class="form-group" style="justify-content: center;">
+                                <label style="display: flex; align-items: center; gap: 8px; font-size: 0.85rem; color: #fff; cursor: pointer;">
+                                    <input type="checkbox" id="syncCookiesCheck" checked style="accent-color: var(--primary);">
+                                    <span>Sync TikTok Session Cookies</span>
+                                </label>
+                                <div class="form-hint">Enables authenticated tapping across all connected computers & servers.</div>
+                            </div>
+                        </div>
+
+                        <div id="syncTestFeedback" style="display: none;" class="status-alert"></div>
+
+                        <div style="display: flex; gap: 10px; margin-top: 1.25rem; flex-wrap: wrap;">
+                            <button class="btn btn-secondary" id="btnTestSync" onclick="testSyncConnection()">🔍 Test Connection</button>
+                            <button class="btn btn-primary" id="btnSaveSync" onclick="saveSyncConfig(true)">💾 Save & Sync Now</button>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -735,6 +1069,30 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </main>
 
     <div id="toast">Notification</div>
+
+    <!-- Cookie Import Modal -->
+    <div class="modal-overlay" id="cookieModal">
+        <div class="modal-card">
+            <div class="modal-header">
+                <div class="modal-title">🍪 Import TikTok Cookies / Session ID</div>
+                <button class="modal-close" onclick="closeCookieModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p style="font-size: 0.82rem; color: var(--text-muted); line-height: 1.5;">
+                    Paste any of the following to authenticate your headless server:
+                    <br>• Plain <code>sessionid</code> token string (e.g. <code>6d9d2da0810c...</code>)
+                    <br>• JSON cookie array from <em>Cookie-Editor</em> or <em>EditThisCookie</em>
+                    <br>• Standard HTTP <code>Cookie:</code> header string
+                </p>
+                <textarea id="cookieInputArea" class="form-input" style="height: 140px; font-family: monospace; font-size: 0.78rem; resize: vertical;" placeholder="Paste sessionid, JSON cookie array, or cookie header here..."></textarea>
+                <div id="cookieImportError" style="font-size: 0.8rem; color: var(--primary); display: none;"></div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeCookieModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="submitCookieImport()">Import & Authenticate</button>
+            </div>
+        </div>
+    </div>
 
     <script>
         let allFavorites = [];
@@ -975,14 +1333,213 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             } catch (e) {}
         }
 
+        // --- Cloud Sync & Cookie Management JS ---
+        let currentSyncMethod = 'folder';
+
+        function selectSyncMethod(method) {
+            currentSyncMethod = method;
+            document.querySelectorAll('.provider-btn').forEach(b => b.classList.remove('active'));
+            document.getElementById('secFolder').style.display = (method === 'folder') ? 'block' : 'none';
+            document.getElementById('secWebDAV').style.display = (method === 'webdav') ? 'block' : 'none';
+            document.getElementById('secREST').style.display = (method === 'rest') ? 'block' : 'none';
+
+            if (method === 'folder') document.getElementById('btnMethodFolder').classList.add('active');
+            else if (method === 'webdav') document.getElementById('btnMethodWebdav').classList.add('active');
+            else if (method === 'rest') document.getElementById('btnMethodRest').classList.add('active');
+        }
+
+        function onSyncToggleChange() {
+            const enabled = document.getElementById('syncEnabledToggle').checked;
+            const sec = document.getElementById('syncConfigSection');
+            if (sec) {
+                sec.style.opacity = enabled ? '1' : '0.6';
+            }
+        }
+
+        async function fetchSyncConfig() {
+            try {
+                const res = await fetch('/api/sync/config');
+                if (!res.ok) return;
+                const cfg = await res.json();
+                document.getElementById('syncEnabledToggle').checked = !!cfg.enabled;
+                selectSyncMethod(cfg.method || 'folder');
+
+                if (cfg.folder_path) document.getElementById('syncFolderPath').value = cfg.folder_path;
+                if (cfg.webdav_url) document.getElementById('syncWebdavUrl').value = cfg.webdav_url;
+                if (cfg.webdav_username) document.getElementById('syncWebdavUser').value = cfg.webdav_username;
+                if (cfg.webdav_password) document.getElementById('syncWebdavPass').value = cfg.webdav_password;
+                if (cfg.rest_url) document.getElementById('syncRestUrl').value = cfg.rest_url;
+                if (cfg.rest_api_key) document.getElementById('syncRestKey').value = cfg.rest_api_key;
+                if (cfg.auto_sync_interval_s) document.getElementById('syncIntervalSelect').value = String(cfg.auto_sync_interval_s);
+                document.getElementById('syncCookiesCheck').checked = cfg.sync_cookies !== false;
+
+                if (cfg.last_sync_status) {
+                    document.getElementById('syncBadgeHeader').textContent = cfg.last_sync_status;
+                }
+                onSyncToggleChange();
+            } catch (e) {}
+        }
+
+        async function testSyncConnection() {
+            const feedback = document.getElementById('syncTestFeedback');
+            feedback.style.display = 'block';
+            feedback.className = 'status-alert';
+            feedback.textContent = 'Testing connection...';
+
+            const payload = {
+                method: currentSyncMethod,
+                folder_path: document.getElementById('syncFolderPath').value.trim(),
+                webdav_url: document.getElementById('syncWebdavUrl').value.trim(),
+                webdav_username: document.getElementById('syncWebdavUser').value.trim(),
+                webdav_password: document.getElementById('syncWebdavPass').value.trim(),
+                rest_url: document.getElementById('syncRestUrl').value.trim(),
+                rest_api_key: document.getElementById('syncRestKey').value.trim()
+            };
+
+            try {
+                const res = await fetch('/api/sync/test', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const data = await res.json();
+                if (data.success) {
+                    feedback.className = 'status-alert success';
+                    feedback.textContent = `✅ ${data.message || 'Connection successful!'}`;
+                } else {
+                    feedback.className = 'status-alert error';
+                    feedback.textContent = `❌ ${data.message || 'Connection failed'}`;
+                }
+            } catch (e) {
+                feedback.className = 'status-alert error';
+                feedback.textContent = `❌ Connection test failed: ${e.message}`;
+            }
+        }
+
+        async function saveSyncConfig(triggerNow = false) {
+            const payload = {
+                enabled: document.getElementById('syncEnabledToggle').checked,
+                method: currentSyncMethod,
+                folder_path: document.getElementById('syncFolderPath').value.trim(),
+                webdav_url: document.getElementById('syncWebdavUrl').value.trim(),
+                webdav_username: document.getElementById('syncWebdavUser').value.trim(),
+                webdav_password: document.getElementById('syncWebdavPass').value.trim(),
+                rest_url: document.getElementById('syncRestUrl').value.trim(),
+                rest_api_key: document.getElementById('syncRestKey').value.trim(),
+                auto_sync_interval_s: parseInt(document.getElementById('syncIntervalSelect').value) || 60,
+                sync_cookies: document.getElementById('syncCookiesCheck').checked
+            };
+
+            try {
+                const res = await fetch('/api/sync/config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const data = await res.json();
+                if (data.status === 'ok') {
+                    showToast('Cloud Sync settings saved!');
+                    if (triggerNow && payload.enabled) {
+                        await triggerSync();
+                    }
+                } else {
+                    showToast('Failed to save sync settings');
+                }
+            } catch (e) {
+                showToast('Save sync settings error');
+            }
+        }
+
+        // --- TikTok Cookie & Session Handlers ---
+        async function fetchCookieStatus() {
+            try {
+                const res = await fetch('/api/cookies');
+                if (!res.ok) return;
+                const data = await res.json();
+                const pill = document.getElementById('authStatusPill');
+                const text = document.getElementById('authDetailsText');
+                const clearBtn = document.getElementById('clearSessionBtn');
+
+                if (data.is_authenticated) {
+                    pill.className = 'auth-pill logged-in';
+                    pill.textContent = '● Authenticated';
+                    text.textContent = `Active session: ${data.session_masked} (${data.cookie_count} cookies loaded)`;
+                    clearBtn.style.display = 'inline-flex';
+                } else {
+                    pill.className = 'auth-pill guest';
+                    pill.textContent = '○ Guest Mode';
+                    text.textContent = 'No authenticated session loaded. Tapping operates in guest mode.';
+                    clearBtn.style.display = 'none';
+                }
+            } catch (e) {}
+        }
+
+        function openCookieModal() {
+            document.getElementById('cookieModal').classList.add('open');
+            document.getElementById('cookieInputArea').focus();
+        }
+
+        function closeCookieModal() {
+            document.getElementById('cookieModal').classList.remove('open');
+            document.getElementById('cookieInputArea').value = '';
+            document.getElementById('cookieImportError').style.display = 'none';
+        }
+
+        async function submitCookieImport() {
+            const raw = document.getElementById('cookieInputArea').value.trim();
+            const errDiv = document.getElementById('cookieImportError');
+            if (!raw) {
+                errDiv.textContent = 'Please paste your sessionid, JSON cookie array, or Cookie header string.';
+                errDiv.style.display = 'block';
+                return;
+            }
+
+            try {
+                const res = await fetch('/api/cookies', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ raw_cookies: raw })
+                });
+                const data = await res.json();
+                if (data.status === 'ok') {
+                    closeCookieModal();
+                    showToast(data.message || 'TikTok session imported!');
+                    await fetchCookieStatus();
+                    await fetchStatus();
+                    await fetchFavorites();
+                } else {
+                    errDiv.textContent = data.message || data.error || 'Failed to import cookies';
+                    errDiv.style.display = 'block';
+                }
+            } catch (e) {
+                errDiv.textContent = 'Request failed: ' + e.message;
+                errDiv.style.display = 'block';
+            }
+        }
+
+        async function clearCookies() {
+            if (!confirm('Are you sure you want to sign out and clear your TikTok session cookies on this server?')) return;
+            try {
+                const res = await fetch('/api/cookies/clear', { method: 'POST' });
+                const data = await res.json();
+                showToast(data.message || 'Session cleared');
+                await fetchCookieStatus();
+            } catch (e) {
+                showToast('Failed to clear session');
+            }
+        }
+
         // Initialize dashboard
         fetchStatus();
         fetchFavorites();
         fetchSettings();
+        fetchSyncConfig();
+        fetchCookieStatus();
 
         // Real-time polling
         setInterval(fetchStatus, 3000);
         setInterval(fetchFavorites, 6000);
+        setInterval(fetchCookieStatus, 8000);
     </script>
 </body>
 </html>
@@ -1054,6 +1611,20 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
             self._send_json(200, runner.get_recent_logs())
             return
 
+        if path == "/api/sync/config":
+            if not runner:
+                self._send_json(200, {})
+                return
+            self._send_json(200, runner.get_sync_config())
+            return
+
+        if path == "/api/cookies":
+            if not runner:
+                self._send_json(200, {"is_authenticated": False, "cookie_count": 0})
+                return
+            self._send_json(200, runner.get_cookie_status())
+            return
+
         self._send_json(404, {"error": "Not found"})
 
     def do_POST(self):
@@ -1110,6 +1681,42 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
             else:
                 msg = "No runner connected"
             self._send_json(200, {"status": "ok", "message": msg})
+            return
+
+        if path == "/api/sync/config":
+            if runner:
+                ok, msg = runner.save_sync_config(payload)
+                self._send_json(200, {"status": "ok" if ok else "error", "message": msg})
+            else:
+                self._send_json(400, {"error": "No runner connected"})
+            return
+
+        if path == "/api/sync/test":
+            if runner:
+                ok, msg = runner.test_sync_config(payload)
+                self._send_json(200, {"success": ok, "message": msg})
+            else:
+                self._send_json(400, {"error": "No runner connected"})
+            return
+
+        if path == "/api/cookies":
+            raw = payload.get("raw_cookies", "")
+            if not raw:
+                self._send_json(400, {"error": "Empty cookie input"})
+                return
+            if runner:
+                ok, msg, count = runner.import_cookies(raw)
+                self._send_json(200, {"status": "ok" if ok else "error", "message": msg, "count": count})
+            else:
+                self._send_json(400, {"error": "No runner connected"})
+            return
+
+        if path == "/api/cookies/clear":
+            if runner:
+                ok, msg = runner.clear_cookies()
+                self._send_json(200, {"status": "ok", "message": msg})
+            else:
+                self._send_json(400, {"error": "No runner connected"})
             return
 
         self._send_json(404, {"error": "Not found"})

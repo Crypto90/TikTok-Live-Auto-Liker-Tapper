@@ -406,6 +406,61 @@ if HAS_MAC_WEBKIT:
                 except Exception:
                     pass
 
+        @classmethod
+        def extract_all_cookies(cls, callback):
+            """Extract all TikTok cookies from default WKWebsiteDataStore."""
+            if not HAS_MAC_WEBKIT:
+                if callback: callback([])
+                return
+            try:
+                store = WebKit.WKWebsiteDataStore.defaultDataStore().httpCookieStore()
+                def handler(cookies):
+                    res = []
+                    for ck in (cookies or []):
+                        d = str(ck.domain() or "")
+                        if "tiktok.com" in d:
+                            res.append({
+                                "name": str(ck.name() or ""),
+                                "value": str(ck.value() or ""),
+                                "domain": d,
+                                "path": str(ck.path() or "/"),
+                                "secure": bool(ck.isSecure()),
+                                "http_only": bool(ck.isHTTPOnly()),
+                            })
+                    if callback:
+                        callback(res)
+                store.getAllCookies_(handler)
+            except Exception:
+                if callback: callback([])
+
+        @classmethod
+        def inject_cookies(cls, cookies_list):
+            """Inject TikTok cookies into default WKWebsiteDataStore."""
+            if not HAS_MAC_WEBKIT or not cookies_list:
+                return
+            try:
+                store = WebKit.WKWebsiteDataStore.defaultDataStore().httpCookieStore()
+                for item in cookies_list:
+                    if not isinstance(item, dict) or not item.get("name") or not item.get("value"):
+                        continue
+                    props = {
+                        AppKit.NSHTTPCookieName: str(item["name"]),
+                        AppKit.NSHTTPCookieValue: str(item["value"]),
+                        AppKit.NSHTTPCookieDomain: str(item.get("domain") or ".tiktok.com"),
+                        AppKit.NSHTTPCookiePath: str(item.get("path") or "/"),
+                        AppKit.NSHTTPCookieSecure: bool(item.get("secure", True)),
+                    }
+                    if item.get("expires"):
+                        try:
+                            props[AppKit.NSHTTPCookieExpires] = AppKit.NSDate.dateWithTimeIntervalSince1970_(float(item["expires"]))
+                        except Exception:
+                            pass
+                    cookie = AppKit.NSHTTPCookie.cookieWithProperties_(props)
+                    if cookie:
+                        store.setCookie_completionHandler_(cookie, None)
+            except Exception:
+                pass
+
         def cleanup(self):
             if hasattr(self, '_url_poll_timer'):
                 self._url_poll_timer.stop()
@@ -755,6 +810,39 @@ if HAS_QT_WEBENGINE:
             self._dev_tools_window.show()
             self._dev_tools_window.raise_()
 
+        @classmethod
+        def inject_cookies(cls, cookies_list, profile=None):
+            """Inject TikTok cookies into QtWebEngine cookie store."""
+            if not HAS_QT_WEBENGINE or not cookies_list:
+                return
+            try:
+                from PyQt6.QtNetwork import QNetworkCookie
+                from PyQt6.QtCore import QUrl, QDateTime
+                if profile is None:
+                    profile = cls.get_profile()
+                store = profile.cookieStore()
+                target_url = QUrl("https://www.tiktok.com/")
+                for item in cookies_list:
+                    if not isinstance(item, dict) or not item.get("name") or not item.get("value"):
+                        continue
+                    name = str(item["name"]).encode("utf-8")
+                    val = str(item["value"]).encode("utf-8")
+                    c = QNetworkCookie(name, val)
+                    domain = str(item.get("domain") or ".tiktok.com")
+                    c.setDomain(domain)
+                    c.setPath(str(item.get("path") or "/"))
+                    c.setSecure(bool(item.get("secure", True)))
+                    c.setHttpOnly(bool(item.get("http_only", True)))
+                    if item.get("expires"):
+                        try:
+                            dt = QDateTime.fromSecsSinceEpoch(int(float(item["expires"])))
+                            c.setExpirationDate(dt)
+                        except Exception:
+                            pass
+                    store.setCookie(c, target_url)
+            except Exception:
+                pass
+
         def cleanup(self):
             self.stop_tapper()
             if self.web:
@@ -789,6 +877,26 @@ class UniversalWebView(QWidget):
 
     navigation_completed = pyqtSignal(bool, str)
     source_changed = pyqtSignal(str)
+
+    @classmethod
+    def extract_all_cookies(cls, callback):
+        """Extract TikTok cookies from the primary platform browser engine."""
+        engine_cls = get_best_engine_class()
+        if hasattr(engine_cls, 'extract_all_cookies'):
+            engine_cls.extract_all_cookies(callback)
+        elif callback:
+            callback([])
+
+    @classmethod
+    def inject_cookies_into_profile(cls, cookies_list, storage_path=None):
+        """Inject TikTok cookies into the current platform engine profile."""
+        if not cookies_list:
+            return
+        if sys.platform == "darwin" and HAS_MAC_WEBKIT:
+            MacWKWebViewWidget.inject_cookies(cookies_list)
+        if HAS_QT_WEBENGINE:
+            profile = QtWebEngineWebViewWidget.get_profile(storage_path)
+            QtWebEngineWebViewWidget.inject_cookies(cookies_list, profile=profile)
 
     def __init__(self, parent=None, user_data_folder=None, url=None, lazyload=False, init_settings_hook=None, is_headless=False):
         super().__init__(parent)
