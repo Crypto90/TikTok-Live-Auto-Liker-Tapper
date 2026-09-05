@@ -93,7 +93,7 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          name: "v1.1.4 - Unthrottled Background Auto-Tapping & Multi-Tab Performance"
+          name: "v1.1.5 - Restored Fast Tapping & Fixed Explore Tab Loading"
           body_path: RELEASE_NOTES.md
           files: |
             release_assets/TikTokLiveAutoLiker.exe
