@@ -22,19 +22,8 @@ import argparse
 import subprocess
 from typing import Dict, Any, List
 
-# Suppress console spam from QtWebEngine and prevent Chromium/WebView2 background timer throttling
-CHROMIUM_ANTI_THROTTLING_FLAGS = (
-    "--disable-background-timer-throttling "
-    "--disable-backgrounding-occluded-windows "
-    "--disable-renderer-backgrounding "
-    "--disable-features=CalculateNativeWinOcclusion,IntensiveWakeUpThrottling,ThrottleDisplayNoneAndVisibilityHiddenCrossOriginIframes"
-)
-os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = (
-    "--disable-logging --log-level=3 --disable-gpu-memory-buffer-video-frames " + CHROMIUM_ANTI_THROTTLING_FLAGS
-)
-existing_wv2 = os.environ.get("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "")
-if "--disable-background-timer-throttling" not in existing_wv2:
-    os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = (existing_wv2 + " " + CHROMIUM_ANTI_THROTTLING_FLAGS).strip()
+# Suppress console spam from QtWebEngine
+os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--disable-logging --log-level=3 --disable-gpu-memory-buffer-video-frames"
 os.environ["QT_LOGGING_RULES"] = "qt.qpa.fonts.warning=false"
 
 
@@ -159,9 +148,15 @@ class HeadlessStreamTab(QObject):
         else:
             self.live_rate = 0.0
 
-        # Watchdog: ensure headless background taps advance unthrottled
-        if self.tapper_enabled and delta_d <= 1 and dt >= 1.0:
-            self.webview.wakeup_tapper()
+        # Headless background catch-up watchdog:
+        if self.tapper_enabled and dt >= 0.8:
+            base = self.settings.get("like_delay_ms", 100)
+            rand = self.settings.get("randomization_ms", 50)
+            avg_delay_ms = max(40, base + (rand // 2))
+            expected = int(round((dt * 1000.0) / avg_delay_ms))
+            needed = max(0, expected - delta_d)
+            if needed > 0:
+                self.webview.burst_tapper(needed)
 
         self._last_stats_tick = now
         self._last_verified = verified

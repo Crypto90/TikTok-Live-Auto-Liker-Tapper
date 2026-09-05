@@ -13,22 +13,6 @@ from ctypes import c_void_p
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QMainWindow
 from PyQt6.QtCore import Qt, QUrl, pyqtSignal, QObject, QTimer
 
-# Configure Chromium / WebView2 anti-throttling flags so background tabs run timers unthrottled
-CHROMIUM_ANTI_THROTTLING_FLAGS = (
-    "--disable-background-timer-throttling "
-    "--disable-backgrounding-occluded-windows "
-    "--disable-renderer-backgrounding "
-    "--disable-features=CalculateNativeWinOcclusion,IntensiveWakeUpThrottling,ThrottleDisplayNoneAndVisibilityHiddenCrossOriginIframes"
-)
-
-existing_wv2 = os.environ.get("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "")
-if "--disable-background-timer-throttling" not in existing_wv2:
-    os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = (existing_wv2 + " " + CHROMIUM_ANTI_THROTTLING_FLAGS).strip()
-
-existing_qt = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
-if "--disable-background-timer-throttling" not in existing_qt:
-    os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = (existing_qt + " " + CHROMIUM_ANTI_THROTTLING_FLAGS).strip()
-
 # Detection of available backends
 HAS_MAC_WEBKIT = False
 HAS_WIN_WEBVIEW2 = False
@@ -65,29 +49,12 @@ TAPPER_IN_PAGE_SCRIPT = """
     }
     window.__tiktokAutoTapperInstalled = true;
 
-    // --- Document Visibility & Focus Spoofing (Prevent background tab sleep/freeze) ---
-    try {
-        Object.defineProperty(document, 'hidden', {
-            get: function() { return false; },
-            configurable: true
-        });
-        Object.defineProperty(document, 'visibilityState', {
-            get: function() { return 'visible'; },
-            configurable: true
-        });
-        if (typeof document.hasFocus === 'function') {
-            document.hasFocus = function() { return true; };
-        }
-        document.dispatchEvent(new Event('visibilitychange'));
-    } catch(e) {}
-
     var state = {
         enabled: true,
         baseDelay: 100,
         randomization: 50,
         timerId: null,
-        cleanupTimerId: null,
-        worker: null
+        cleanupTimerId: null
     };
 
     var stats = {
@@ -241,73 +208,7 @@ TAPPER_IN_PAGE_SCRIPT = """
         return Math.max(50, state.baseDelay + Math.floor(Math.random() * (state.randomization + 1)));
     }
 
-    // --- Unthrottled Web Worker Timer ---
-    // Browsers clamp background window.setTimeout to >= 1000ms.
-    // An inline Web Worker runs on an OS thread not subject to tab visibility timer clamping.
-    function ensureWorker() {
-        if (state.worker) return state.worker;
-        try {
-            var workerBlob = new Blob([
-                'var timer = null; ' +
-                'self.onmessage = function(e) { ' +
-                '    if (e.data && e.data.type === "schedule") { ' +
-                '        if (timer) clearTimeout(timer); ' +
-                '        timer = setTimeout(function() { ' +
-                '            self.postMessage("tick"); ' +
-                '        }, e.data.delay || 100); ' +
-                '    } else if (e.data && e.data.type === "stop") { ' +
-                '        if (timer) clearTimeout(timer); ' +
-                '        timer = null; ' +
-                '    } ' +
-                '};'
-            ], { type: 'application/javascript' });
-            var workerUrl = URL.createObjectURL(workerBlob);
-            var w = new Worker(workerUrl);
-            w.onmessage = function(e) {
-                if (e.data === 'tick') {
-                    if (state.enabled) {
-                        triggerTap();
-                    }
-                }
-            };
-            state.worker = w;
-            return w;
-        } catch(err) {
-            state.worker = null;
-            return null;
-        }
-    }
-
-    function scheduleNextTap(delay) {
-        if (!state.enabled) return;
-        var ms = typeof delay === 'number' ? delay : getNextDelay();
-        var w = ensureWorker();
-        if (w) {
-            try {
-                w.postMessage({ type: 'schedule', delay: ms });
-                return;
-            } catch(e) {
-                state.worker = null;
-            }
-        }
-        // Fallback to standard window.setTimeout if Worker is blocked (e.g. strict CSP)
-        if (state.timerId) clearTimeout(state.timerId);
-        state.timerId = setTimeout(triggerTap, ms);
-    }
-
-    function stopSchedule() {
-        if (state.worker) {
-            try {
-                state.worker.postMessage({ type: 'stop' });
-            } catch(e) {}
-        }
-        if (state.timerId) {
-            clearTimeout(state.timerId);
-            state.timerId = null;
-        }
-    }
-
-    function triggerTap() {
+    function triggerSingleTap() {
         if (!state.enabled) return;
         stats.dispatched++;
 
@@ -338,14 +239,19 @@ TAPPER_IN_PAGE_SCRIPT = """
             }
         } catch(e) {}
 
-        // Proportional DOM cleanup every 30 taps to guarantee memory hygiene even in background tabs
+        // Proportional DOM cleanup every 30 taps to guarantee memory hygiene
         if (stats.dispatched % 30 === 0) {
             pruneDOM();
         }
+    }
+
+    function triggerTap() {
+        if (!state.enabled) return;
+        triggerSingleTap();
 
         // Schedule next tap with natural jitter
         if (state.enabled) {
-            scheduleNextTap(getNextDelay());
+            state.timerId = setTimeout(triggerTap, getNextDelay());
         }
     }
 
@@ -395,13 +301,11 @@ TAPPER_IN_PAGE_SCRIPT = """
         if (typeof rand === 'number') state.randomization = rand;
         if (enabled !== undefined) state.enabled = !!enabled;
 
-        stopSchedule();
+        if (state.timerId) clearTimeout(state.timerId);
         if (state.cleanupTimerId) clearInterval(state.cleanupTimerId);
 
-        ensureWorker();
-
         if (state.enabled) {
-            scheduleNextTap(getNextDelay());
+            triggerTap();
         }
         // Run DOM pruning every 3 seconds
         state.cleanupTimerId = setInterval(pruneDOM, 3000);
@@ -414,24 +318,39 @@ TAPPER_IN_PAGE_SCRIPT = """
 
     window.__tiktokSetTapperEnabled = function(enabled) {
         state.enabled = !!enabled;
-        if (state.enabled) {
-            ensureWorker();
-            scheduleNextTap(getNextDelay());
-        } else {
-            stopSchedule();
+        if (state.enabled && !state.timerId) {
+            triggerTap();
+        } else if (!state.enabled && state.timerId) {
+            clearTimeout(state.timerId);
+            state.timerId = null;
         }
     };
 
     window.__tiktokStopTapper = function() {
         state.enabled = false;
-        stopSchedule();
+        if (state.timerId) clearTimeout(state.timerId);
         if (state.cleanupTimerId) clearInterval(state.cleanupTimerId);
+        state.timerId = null;
         state.cleanupTimerId = null;
+    };
+
+    window.__tiktokTapperBurst = function(count) {
+        if (!state.enabled) return;
+        var n = Math.min(30, Math.max(1, count || 1));
+        for (var i = 0; i < n; i++) {
+            triggerSingleTap();
+        }
+        if (state.enabled && !state.timerId) {
+            state.timerId = setTimeout(triggerTap, getNextDelay());
+        }
     };
 
     window.__tiktokTapperWakeup = function() {
         if (state.enabled) {
-            triggerTap();
+            triggerSingleTap();
+            if (!state.timerId) {
+                state.timerId = setTimeout(triggerTap, getNextDelay());
+            }
         }
     };
 
@@ -675,6 +594,9 @@ if HAS_MAC_WEBKIT:
         def wakeup_tapper(self):
             self.evaluate_js("if (window.__tiktokTapperWakeup) window.__tiktokTapperWakeup();")
 
+        def burst_tapper(self, count):
+            self.evaluate_js(f"if (window.__tiktokTapperBurst) window.__tiktokTapperBurst({int(count)});")
+
         def reload(self):
             if getattr(self, 'wk', None):
                 self.wk.reload()
@@ -894,6 +816,9 @@ if HAS_WIN_WEBVIEW2:
         def wakeup_tapper(self):
             self.evaluate_js("if (window.__tiktokTapperWakeup) window.__tiktokTapperWakeup();")
 
+        def burst_tapper(self, count):
+            self.evaluate_js(f"if (window.__tiktokTapperBurst) window.__tiktokTapperBurst({int(count)});")
+
         def reload(self):
             if self.wv2:
                 self.wv2.reload()
@@ -1067,6 +992,9 @@ if HAS_QT_WEBENGINE:
         def wakeup_tapper(self):
             self.evaluate_js("if (window.__tiktokTapperWakeup) window.__tiktokTapperWakeup();")
 
+        def burst_tapper(self, count):
+            self.evaluate_js(f"if (window.__tiktokTapperBurst) window.__tiktokTapperBurst({int(count)});")
+
         def reload(self):
             if self.web:
                 self.web.reload()
@@ -1220,6 +1148,10 @@ class UniversalWebView(QWidget):
     def wakeup_tapper(self):
         if getattr(self, '_engine', None) and hasattr(self._engine, 'wakeup_tapper'):
             self._engine.wakeup_tapper()
+
+    def burst_tapper(self, count):
+        if getattr(self, '_engine', None) and hasattr(self._engine, 'burst_tapper'):
+            self._engine.burst_tapper(count)
 
     def get_tapper_stats(self, callback):
         """Query live in-page tapper stats (dispatched, verified, failed, roomLikes, uptimeSeconds)."""

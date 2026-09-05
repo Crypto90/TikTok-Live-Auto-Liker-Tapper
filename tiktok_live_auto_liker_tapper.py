@@ -1,19 +1,8 @@
 import os
 import sys
 
-# Suppress C++ stderr console spam from QtWebEngine & QFont, and prevent Chromium/WebView2 background timer throttling
-CHROMIUM_ANTI_THROTTLING_FLAGS = (
-    "--disable-background-timer-throttling "
-    "--disable-backgrounding-occluded-windows "
-    "--disable-renderer-backgrounding "
-    "--disable-features=CalculateNativeWinOcclusion,IntensiveWakeUpThrottling,ThrottleDisplayNoneAndVisibilityHiddenCrossOriginIframes"
-)
-os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = (
-    "--disable-logging --log-level=3 --disable-gpu-memory-buffer-video-frames " + CHROMIUM_ANTI_THROTTLING_FLAGS
-)
-existing_wv2 = os.environ.get("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "")
-if "--disable-background-timer-throttling" not in existing_wv2:
-    os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = (existing_wv2 + " " + CHROMIUM_ANTI_THROTTLING_FLAGS).strip()
+# Suppress C++ stderr console spam from QtWebEngine & QFont
+os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--disable-logging --log-level=3 --disable-gpu-memory-buffer-video-frames"
 os.environ["QT_LOGGING_RULES"] = "qt.qpa.fonts.warning=false"
 
 import json
@@ -655,8 +644,20 @@ class LiveTab(QWidget):
         else:
             self._live_rate = 0.0
 
-        # Watchdog: if auto-tapper is enabled and tab is in background, ensure taps advance unthrottled
-        if self.tapper_enabled and self._is_background and delta_d <= 1 and dt >= 1.0:
+        # Tapper maintenance and background catch-up:
+        # If tab is in background, browsers clamp setTimeout to 1Hz.
+        # We compute expected taps based on like_delay_ms and burst any shortfall
+        # in a single IPC call per second, keeping background tabs at full speed!
+        if self.tapper_enabled and self._is_background and dt >= 0.8:
+            base = self.settings.get("like_delay_ms", 100)
+            rand = self.settings.get("randomization_ms", 50)
+            avg_delay_ms = max(40, base + (rand // 2))
+            expected = int(round((dt * 1000.0) / avg_delay_ms))
+            needed = max(0, expected - delta_d)
+            if needed > 0:
+                self.webview.burst_tapper(needed)
+        elif self.tapper_enabled and not self._is_background and delta_d == 0 and dt >= 1.5:
+            # Foreground safety watchdog: wake up loop if temporarily paused
             self.webview.wakeup_tapper()
 
         self._last_stats_tick = now
@@ -2262,6 +2263,12 @@ class TikTokAutoLikerApp(QMainWindow):
 
     def refresh_current_tab(self):
         current_widget = self.tabs.currentWidget()
+        if hasattr(self, 'explore_webview') and current_widget == self.explore_webview:
+            self._explore_loaded = True
+            self.explore_webview.load_url("https://www.tiktok.com/")
+            self.explore_webview.set_muted(False)
+            self.explore_webview.set_background_mode(False)
+            return
         if hasattr(current_widget, 'reload'):
             current_widget.reload()
         elif hasattr(current_widget, 'webview') and hasattr(current_widget.webview, 'reload'):
@@ -2808,12 +2815,17 @@ class TikTokAutoLikerApp(QMainWindow):
                 del self.active_streams[username]
                 break
 
-        self.tabs.removeTab(index)
-        if hasattr(widget, 'cleanup'):
-            widget.cleanup()
-        widget.deleteLater()
-        self._update_waiting_tab()
-        self._fallback_tab_selection()
+        self.tabs.blockSignals(True)
+        try:
+            self.tabs.removeTab(index)
+            if hasattr(widget, 'cleanup'):
+                widget.cleanup()
+            widget.deleteLater()
+            self._update_waiting_tab()
+            self._fallback_tab_selection()
+        finally:
+            self.tabs.blockSignals(False)
+            self._on_tab_changed(self.tabs.currentIndex())
 
     def _fallback_tab_selection(self):
         current = self.tabs.currentWidget()
@@ -2853,17 +2865,6 @@ class TikTokAutoLikerApp(QMainWindow):
         is_explore = (self.explore_webview is not None and current_widget == self.explore_webview)
 
         if is_explore:
-            # Guard: if there are no active streams and the waiting tab is present, this is a
-            # transient state caused by Qt's automatic tab selection during removeTab().
-            # _fallback_tab_selection() will redirect to the idle tab momentarily —
-            # don't load or unmute the explore tab now to avoid autoplay / audio leaks.
-            waiting_in_bar = (
-                getattr(self, 'waiting_webview', None) is not None
-                and self.tabs.indexOf(self.waiting_webview) != -1
-            )
-            if not self.active_streams and waiting_in_bar:
-                return
-
             if not getattr(self, '_explore_loaded', False):
                 self._explore_loaded = True
                 self.explore_webview.load_url("https://www.tiktok.com/")
@@ -2891,13 +2892,18 @@ class TikTokAutoLikerApp(QMainWindow):
 
         tab = self.active_streams[username]
         tab_idx = self.tabs.indexOf(tab)
-        if tab_idx != -1:
-            self.tabs.removeTab(tab_idx)
-        tab.cleanup()
-        tab.deleteLater()
-        del self.active_streams[username]
-        self._update_waiting_tab()
-        self._fallback_tab_selection()
+        self.tabs.blockSignals(True)
+        try:
+            if tab_idx != -1:
+                self.tabs.removeTab(tab_idx)
+            tab.cleanup()
+            tab.deleteLater()
+            del self.active_streams[username]
+            self._update_waiting_tab()
+            self._fallback_tab_selection()
+        finally:
+            self.tabs.blockSignals(False)
+            self._on_tab_changed(self.tabs.currentIndex())
 
 
 if __name__ == "__main__":
