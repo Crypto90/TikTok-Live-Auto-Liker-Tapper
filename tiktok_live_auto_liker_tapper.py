@@ -2695,8 +2695,19 @@ class NotificationSettingsDialog(QDialog):
         layout.addLayout(btn_box)
 
     def _test_os_notification(self):
-        if self.test_desktop_fn:
-            self.test_desktop_fn("🔔 Test Notification", "Desktop OS notifications are working properly!")
+        fn = self.test_desktop_fn
+        if not fn and hasattr(self.parent(), '_notify_desktop'):
+            fn = self.parent()._notify_desktop
+        elif hasattr(fn, '_notify_desktop'):
+            fn = fn._notify_desktop
+
+        if callable(fn):
+            try:
+                fn("🔔 Test Notification", "Desktop OS notifications are working properly!", force=True)
+            except TypeError:
+                fn("🔔 Test Notification", "Desktop OS notifications are working properly!")
+            except Exception as e:
+                print(f"Error triggering test notification: {e}")
 
     def _test_discord(self):
         url = self.input_discord.text().strip()
@@ -4350,12 +4361,19 @@ class TikTokAutoLikerApp(QMainWindow):
             self.tray_icon.setToolTip(f"TikTok Live Auto Liker {APP_VERSION}")
             self.tray_icon.show()
 
-    def _notify_desktop(self, title: str, message: str):
+    def _notify_desktop(self, title: str, message: str, force: bool = False):
         notif_cfg = self.settings.setdefault("notifications", {})
-        if not notif_cfg.get("desktop_notifications_enabled", True):
+        if not force and not notif_cfg.get("desktop_toasts", notif_cfg.get("desktop_notifications_enabled", True)):
             return
-        if getattr(self, 'tray_icon', None) and self.tray_icon.isSystemTrayAvailable():
-            self.tray_icon.showMessage(title, message, QSystemTrayIcon.MessageIcon.Information, 4500)
+        try:
+            if getattr(self, 'tray_icon', None) and self.tray_icon.isSystemTrayAvailable():
+                self.tray_icon.showMessage(title, message, QSystemTrayIcon.MessageIcon.Information, 4500)
+            elif sys.platform == "darwin":
+                clean_title = title.replace('"', '\\"')
+                clean_msg = message.replace('"', '\\"')
+                os.system(f'osascript -e \'display notification "{clean_msg}" with title "{clean_title}"\'')
+        except Exception as e:
+            print(f"Error displaying desktop notification: {e}")
 
     def _on_milestone_reached(self, username: str, count: int, duration_sec: int = 0):
         self._notify_desktop("🎉 Like Milestone Reached!", f"@{username} reached {count:,} likes tapped!")
@@ -4396,7 +4414,12 @@ class TikTokAutoLikerApp(QMainWindow):
                     self._refresh_grid_layout()
 
     def open_notification_settings(self):
-        dialog = NotificationSettingsDialog(self.settings, self.webhook_notifier, self)
+        dialog = NotificationSettingsDialog(
+            self.settings,
+            webhook_notifier=self.webhook_notifier,
+            test_desktop_fn=self._notify_desktop,
+            parent=self
+        )
         if dialog.exec():
             SettingsManager.save_settings(self.settings)
 
