@@ -151,11 +151,11 @@ class HeadlessStreamTab(QObject):
 
         # Headless background catch-up watchdog:
         if self.tapper_enabled and dt >= 0.8:
-            base = self.settings.get("like_delay_ms", 100)
-            rand = self.settings.get("randomization_ms", 50)
+            base = self.settings.get("like_delay_ms", 165)
+            rand = self.settings.get("randomization_ms", 35)
             avg_delay_ms = max(40, base + (rand // 2))
             expected = int(round((dt * 1000.0) / avg_delay_ms))
-            needed = max(0, expected - delta_d)
+            needed = max(0, min(10, expected - delta_d))
             if needed > 0:
                 self.webview.burst_tapper(needed)
 
@@ -173,9 +173,10 @@ class HeadlessStreamTab(QObject):
         if success:
             self.webview.set_muted(True)
             self.webview.evaluate_js("(function() { var v = document.querySelector('video'); if (v && v.paused) v.play().catch(function(){}); })();")
-            base = self.settings.get("like_delay_ms", 100)
-            rand = self.settings.get("randomization_ms", 50)
-            self.webview.inject_in_page_tapper(base, rand, enabled=self.tapper_enabled)
+            base = self.settings.get("like_delay_ms", 165)
+            rand = self.settings.get("randomization_ms", 35)
+            adaptive = self.settings.get("adaptive_rate", True)
+            self.webview.inject_in_page_tapper(base, rand, enabled=self.tapper_enabled, adaptive=adaptive)
 
             if self.stats_mgr and not self.session_id:
                 self.session_id = self.stats_mgr.start_session(self.username)
@@ -186,9 +187,10 @@ class HeadlessStreamTab(QObject):
 
     def update_settings(self, settings: dict):
         self.settings = settings
-        base = self.settings.get("like_delay_ms", 100)
-        rand = self.settings.get("randomization_ms", 50)
-        self.webview.set_tapper_rate(base, rand)
+        base = self.settings.get("like_delay_ms", 165)
+        rand = self.settings.get("randomization_ms", 35)
+        adaptive = self.settings.get("adaptive_rate", True)
+        self.webview.set_tapper_rate(base, rand, adaptive=adaptive)
 
     def _check_health(self):
         js = """(function() {
@@ -299,7 +301,7 @@ class HeadlessServerManager(QObject):
 
     def _load_settings(self) -> dict:
         set_file = os.path.join(DATA_DIR, "settings.json")
-        default_s = {"like_delay_ms": 100, "randomization_ms": 50}
+        default_s = {"like_delay_ms": 165, "randomization_ms": 35, "adaptive_rate": True}
         if os.path.exists(set_file):
             try:
                 with open(set_file, "r") as f:

@@ -148,8 +148,11 @@ TAPPER_IN_PAGE_SCRIPT = """
 
     var state = {
         enabled: true,
-        baseDelay: 100,
-        randomization: 50,
+        baseDelay: 165,
+        randomization: 35,
+        adaptive: true,
+        minDelay: 130,
+        maxDelay: 260,
         timerId: null,
         cleanupTimerId: null
     };
@@ -161,6 +164,12 @@ TAPPER_IN_PAGE_SCRIPT = """
         roomLikes: 0,
         lastAckTime: 0,
         startTime: Date.now()
+    };
+
+    var adaptWindow = {
+        dispatched: 0,
+        verified: 0,
+        lastCheckTime: Date.now()
     };
 
     // --- Transparent Network Sniffer & Server Like Verifier ---
@@ -187,10 +196,19 @@ TAPPER_IN_PAGE_SCRIPT = """
                             var countMatch = url.match(/[?&]count=(\d+)/i);
                             if (countMatch && countMatch[1]) {
                                 batchCount = parseInt(countMatch[1], 10) || 1;
-                            } else if (args[1] && args[1].body && typeof args[1].body === 'string') {
-                                var bodyMatch = args[1].body.match(/count=(\d+)/i) || args[1].body.match(/"count"\\s*:\\s*(\\d+)/i);
-                                if (bodyMatch && bodyMatch[1]) {
-                                    batchCount = parseInt(bodyMatch[1], 10) || 1;
+                            } else if (args[1] && args[1].body) {
+                                var b = args[1].body;
+                                if (typeof b === 'string') {
+                                    var bodyMatch = b.match(/count=(\d+)/i) || b.match(/"count"\\s*:\\s*(\\d+)/i);
+                                    if (bodyMatch && bodyMatch[1]) {
+                                        batchCount = parseInt(bodyMatch[1], 10) || 1;
+                                    }
+                                } else if (typeof URLSearchParams !== 'undefined' && b instanceof URLSearchParams) {
+                                    if (b.has('count')) batchCount = parseInt(b.get('count'), 10) || 1;
+                                } else if (typeof FormData !== 'undefined' && b instanceof FormData) {
+                                    if (b.has('count')) batchCount = parseInt(b.get('count'), 10) || 1;
+                                } else if (typeof b === 'object' && b && b.count) {
+                                    batchCount = parseInt(b.count, 10) || 1;
                                 }
                             }
                         } catch(e) {}
@@ -210,7 +228,11 @@ TAPPER_IN_PAGE_SCRIPT = """
                                 var clone = response.clone();
                                 clone.json().then(function(data) {
                                     if (data && data.status_code === 0) {
-                                        stats.verified += batchCount;
+                                        var confirmed = batchCount;
+                                        if (data.data && typeof data.data.count === 'number' && data.data.count > 0) {
+                                            confirmed = data.data.count;
+                                        }
+                                        stats.verified += confirmed;
                                         stats.lastAckTime = Date.now();
                                         if (data.data && typeof data.data.like_count === 'number') {
                                             stats.roomLikes = data.data.like_count;
@@ -259,10 +281,16 @@ TAPPER_IN_PAGE_SCRIPT = """
                             var countMatch = url.match(/[?&]count=(\d+)/i);
                             if (countMatch && countMatch[1]) {
                                 batchCount = parseInt(countMatch[1], 10) || 1;
-                            } else if (body && typeof body === 'string') {
-                                var bodyMatch = body.match(/count=(\d+)/i) || body.match(/"count"\\s*:\\s*(\\d+)/i);
-                                if (bodyMatch && bodyMatch[1]) {
-                                    batchCount = parseInt(bodyMatch[1], 10) || 1;
+                            } else if (body) {
+                                if (typeof body === 'string') {
+                                    var bodyMatch = body.match(/count=(\d+)/i) || body.match(/"count"\\s*:\\s*(\\d+)/i);
+                                    if (bodyMatch && bodyMatch[1]) {
+                                        batchCount = parseInt(bodyMatch[1], 10) || 1;
+                                    }
+                                } else if (typeof URLSearchParams !== 'undefined' && body instanceof URLSearchParams) {
+                                    if (body.has('count')) batchCount = parseInt(body.get('count'), 10) || 1;
+                                } else if (typeof FormData !== 'undefined' && body instanceof FormData) {
+                                    if (body.has('count')) batchCount = parseInt(body.get('count'), 10) || 1;
                                 }
                             }
                         } catch(e) {}
@@ -273,7 +301,11 @@ TAPPER_IN_PAGE_SCRIPT = """
                                     var data = null;
                                     try { data = JSON.parse(xhr.responseText); } catch(e) {}
                                     if (data && data.status_code === 0) {
-                                        stats.verified += batchCount;
+                                        var confirmed = batchCount;
+                                        if (data.data && typeof data.data.count === 'number' && data.data.count > 0) {
+                                            confirmed = data.data.count;
+                                        }
+                                        stats.verified += confirmed;
                                         stats.lastAckTime = Date.now();
                                         if (data.data && typeof data.data.like_count === 'number') {
                                             stats.roomLikes = data.data.like_count;
@@ -305,36 +337,56 @@ TAPPER_IN_PAGE_SCRIPT = """
         return Math.max(50, state.baseDelay + Math.floor(Math.random() * (state.randomization + 1)));
     }
 
+    function checkAdaptiveRate() {
+        if (!state.adaptive) return;
+        var now = Date.now();
+        var deltaD = stats.dispatched - adaptWindow.dispatched;
+        if (deltaD >= 20 && (now - adaptWindow.lastCheckTime) >= 3500) {
+            var deltaV = stats.verified - adaptWindow.verified;
+            var windowRatio = deltaD > 0 ? (deltaV / deltaD) : 1.0;
+
+            if (stats.lastAckTime > 0) {
+                if (windowRatio < 0.78) {
+                    // Confirmed rate below 78%: back off by 15ms to honor client/server debounce
+                    state.baseDelay = Math.min(state.maxDelay, state.baseDelay + 15);
+                } else if (windowRatio >= 0.90 && state.baseDelay > state.minDelay) {
+                    // Confirmed rate stellar (>=90%): probe faster by 5ms
+                    state.baseDelay = Math.max(state.minDelay, state.baseDelay - 5);
+                }
+            }
+            adaptWindow.dispatched = stats.dispatched;
+            adaptWindow.verified = stats.verified;
+            adaptWindow.lastCheckTime = now;
+        }
+    }
+
     function triggerSingleTap() {
         if (!state.enabled) return;
         stats.dispatched++;
 
-        // 1. Dispatch 'L' key with proper bubbling
+        // Dispatch clean 'L' keyboard event (TikTok official desktop like hotkey)
         try {
+            var active = document.activeElement;
+            var isInput = active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable);
+            var target = (!isInput && active) ? active : (document.body || document.documentElement || document);
+
             var kd = new KeyboardEvent('keydown', {
                 key: 'l', code: 'KeyL', keyCode: 76, which: 76, bubbles: true, cancelable: true
             });
             var ku = new KeyboardEvent('keyup', {
                 key: 'l', code: 'KeyL', keyCode: 76, which: 76, bubbles: true, cancelable: true
             });
-            document.dispatchEvent(kd);
-            document.dispatchEvent(ku);
-        } catch(e) {}
+            target.dispatchEvent(kd);
+            target.dispatchEvent(ku);
+        } catch(e) {
+            try {
+                document.dispatchEvent(new KeyboardEvent('keydown', { key: 'l', code: 'KeyL', keyCode: 76, which: 76, bubbles: true }));
+                document.dispatchEvent(new KeyboardEvent('keyup', { key: 'l', code: 'KeyL', keyCode: 76, which: 76, bubbles: true }));
+            } catch(e2) {}
+        }
 
-        // 2. Double-click video container as fallback
-        try {
-            var likeArea = document.querySelector('[data-e2e="live-video"]') || 
-                           document.querySelector('.tiktok-web-player') ||
-                           document.querySelector('video');
-            if (likeArea) {
-                var dbl = new MouseEvent('dblclick', {
-                    view: window,
-                    bubbles: true,
-                    cancelable: true
-                });
-                likeArea.dispatchEvent(dbl);
-            }
-        } catch(e) {}
+        // Closed-loop rate self-optimization
+        checkAdaptiveRate();
 
         // Proportional DOM cleanup every 30 taps to guarantee memory hygiene
         if (stats.dispatched % 30 === 0) {
@@ -393,10 +445,11 @@ TAPPER_IN_PAGE_SCRIPT = """
         } catch(e) {}
     }
 
-    window.__tiktokStartTapper = function(base, rand, enabled) {
+    window.__tiktokStartTapper = function(base, rand, enabled, adaptive) {
         if (typeof base === 'number') state.baseDelay = base;
         if (typeof rand === 'number') state.randomization = rand;
         if (enabled !== undefined) state.enabled = !!enabled;
+        if (adaptive !== undefined) state.adaptive = !!adaptive;
 
         if (state.timerId) clearTimeout(state.timerId);
         if (state.cleanupTimerId) clearInterval(state.cleanupTimerId);
@@ -408,9 +461,14 @@ TAPPER_IN_PAGE_SCRIPT = """
         state.cleanupTimerId = setInterval(pruneDOM, 3000);
     };
 
-    window.__tiktokSetTapperSpeed = function(base, rand) {
-        state.baseDelay = base;
-        state.randomization = rand;
+    window.__tiktokSetTapperSpeed = function(base, rand, adaptive) {
+        if (typeof base === 'number') state.baseDelay = base;
+        if (typeof rand === 'number') state.randomization = rand;
+        if (adaptive !== undefined) state.adaptive = !!adaptive;
+    };
+
+    window.__tiktokSetAdaptive = function(adaptive) {
+        state.adaptive = !!adaptive;
     };
 
     window.__tiktokSetTapperEnabled = function(enabled) {
@@ -433,12 +491,15 @@ TAPPER_IN_PAGE_SCRIPT = """
 
     window.__tiktokTapperBurst = function(count) {
         if (!state.enabled) return;
-        var n = Math.min(30, Math.max(1, count || 1));
+        var n = Math.min(15, Math.max(1, count || 1));
+        var spacing = Math.max(160, state.baseDelay);
         for (var i = 0; i < n; i++) {
-            triggerSingleTap();
+            setTimeout(function() {
+                if (state.enabled) triggerSingleTap();
+            }, i * spacing);
         }
         if (state.enabled && !state.timerId) {
-            state.timerId = setTimeout(triggerTap, getNextDelay());
+            state.timerId = setTimeout(triggerTap, getNextDelay() + (n * spacing));
         }
     };
 
@@ -458,7 +519,9 @@ TAPPER_IN_PAGE_SCRIPT = """
             failed: stats.failed,
             roomLikes: stats.roomLikes,
             lastAckTime: stats.lastAckTime,
-            uptimeSeconds: Math.round((Date.now() - stats.startTime) / 1000)
+            uptimeSeconds: Math.round((Date.now() - stats.startTime) / 1000),
+            currentDelay: state.baseDelay,
+            adaptive: state.adaptive
         };
     };
 })();
@@ -729,14 +792,20 @@ if HAS_MAC_WEBKIT:
             """Isolate live video player to fill 100% of viewport and hide all website chrome/sidebars."""
             self.evaluate_js(PIP_PLAYER_ISOLATE_JS if enabled else PIP_PLAYER_RESTORE_JS)
 
-        def inject_in_page_tapper(self, base_ms=100, rand_ms=50, enabled=True):
+        def inject_in_page_tapper(self, base_ms=165, rand_ms=35, enabled=True, adaptive=True):
             """Injects the tapping engine and starts the loop natively inside the browser."""
-            setup_call = f"window.__tiktokStartTapper({base_ms}, {rand_ms}, {'true' if enabled else 'false'});"
+            setup_call = f"window.__tiktokStartTapper({base_ms}, {rand_ms}, {'true' if enabled else 'false'}, {'true' if adaptive else 'false'});"
             full_js = TAPPER_IN_PAGE_SCRIPT + "\n" + setup_call
             self.evaluate_js(full_js)
 
-        def set_tapper_rate(self, base_ms, rand_ms):
-            self.evaluate_js(f"if (window.__tiktokSetTapperSpeed) window.__tiktokSetTapperSpeed({base_ms}, {rand_ms});")
+        def set_tapper_rate(self, base_ms, rand_ms, adaptive=None):
+            if adaptive is None:
+                self.evaluate_js(f"if (window.__tiktokSetTapperSpeed) window.__tiktokSetTapperSpeed({base_ms}, {rand_ms});")
+            else:
+                self.evaluate_js(f"if (window.__tiktokSetTapperSpeed) window.__tiktokSetTapperSpeed({base_ms}, {rand_ms}, {'true' if adaptive else 'false'});")
+
+        def set_tapper_adaptive(self, adaptive: bool):
+            self.evaluate_js(f"if (window.__tiktokSetAdaptive) window.__tiktokSetAdaptive({'true' if adaptive else 'false'});")
 
         def set_tapper_enabled(self, enabled):
             self.evaluate_js(f"if (window.__tiktokSetTapperEnabled) window.__tiktokSetTapperEnabled({'true' if enabled else 'false'});")
@@ -968,13 +1037,19 @@ if HAS_WIN_WEBVIEW2:
             """Isolate live video player to fill 100% of viewport and hide all website chrome/sidebars."""
             self.evaluate_js(PIP_PLAYER_ISOLATE_JS if enabled else PIP_PLAYER_RESTORE_JS)
 
-        def inject_in_page_tapper(self, base_ms=100, rand_ms=50, enabled=True):
-            setup_call = f"window.__tiktokStartTapper({base_ms}, {rand_ms}, {'true' if enabled else 'false'});"
+        def inject_in_page_tapper(self, base_ms=165, rand_ms=35, enabled=True, adaptive=True):
+            setup_call = f"window.__tiktokStartTapper({base_ms}, {rand_ms}, {'true' if enabled else 'false'}, {'true' if adaptive else 'false'});"
             full_js = TAPPER_IN_PAGE_SCRIPT + "\n" + setup_call
             self.evaluate_js(full_js)
 
-        def set_tapper_rate(self, base_ms, rand_ms):
-            self.evaluate_js(f"if (window.__tiktokSetTapperSpeed) window.__tiktokSetTapperSpeed({base_ms}, {rand_ms});")
+        def set_tapper_rate(self, base_ms, rand_ms, adaptive=None):
+            if adaptive is None:
+                self.evaluate_js(f"if (window.__tiktokSetTapperSpeed) window.__tiktokSetTapperSpeed({base_ms}, {rand_ms});")
+            else:
+                self.evaluate_js(f"if (window.__tiktokSetTapperSpeed) window.__tiktokSetTapperSpeed({base_ms}, {rand_ms}, {'true' if adaptive else 'false'});")
+
+        def set_tapper_adaptive(self, adaptive: bool):
+            self.evaluate_js(f"if (window.__tiktokSetAdaptive) window.__tiktokSetAdaptive({'true' if adaptive else 'false'});")
 
         def set_tapper_enabled(self, enabled):
             self.evaluate_js(f"if (window.__tiktokSetTapperEnabled) window.__tiktokSetTapperEnabled({'true' if enabled else 'false'});")
@@ -1157,13 +1232,19 @@ if HAS_QT_WEBENGINE:
             """Isolate live video player to fill 100% of viewport and hide all website chrome/sidebars."""
             self.evaluate_js(PIP_PLAYER_ISOLATE_JS if enabled else PIP_PLAYER_RESTORE_JS)
 
-        def inject_in_page_tapper(self, base_ms=100, rand_ms=50, enabled=True):
-            setup_call = f"window.__tiktokStartTapper({base_ms}, {rand_ms}, {'true' if enabled else 'false'});"
+        def inject_in_page_tapper(self, base_ms=165, rand_ms=35, enabled=True, adaptive=True):
+            setup_call = f"window.__tiktokStartTapper({base_ms}, {rand_ms}, {'true' if enabled else 'false'}, {'true' if adaptive else 'false'});"
             full_js = TAPPER_IN_PAGE_SCRIPT + "\n" + setup_call
             self.evaluate_js(full_js)
 
-        def set_tapper_rate(self, base_ms, rand_ms):
-            self.evaluate_js(f"if (window.__tiktokSetTapperSpeed) window.__tiktokSetTapperSpeed({base_ms}, {rand_ms});")
+        def set_tapper_rate(self, base_ms, rand_ms, adaptive=None):
+            if adaptive is None:
+                self.evaluate_js(f"if (window.__tiktokSetTapperSpeed) window.__tiktokSetTapperSpeed({base_ms}, {rand_ms});")
+            else:
+                self.evaluate_js(f"if (window.__tiktokSetTapperSpeed) window.__tiktokSetTapperSpeed({base_ms}, {rand_ms}, {'true' if adaptive else 'false'});")
+
+        def set_tapper_adaptive(self, adaptive: bool):
+            self.evaluate_js(f"if (window.__tiktokSetAdaptive) window.__tiktokSetAdaptive({'true' if adaptive else 'false'});")
 
         def set_tapper_enabled(self, enabled):
             self.evaluate_js(f"if (window.__tiktokSetTapperEnabled) window.__tiktokSetTapperEnabled({'true' if enabled else 'false'});")
@@ -1323,11 +1404,15 @@ class UniversalWebView(QWidget):
         if hasattr(self._engine, "set_pip_mode"):
             self._engine.set_pip_mode(enabled)
 
-    def inject_in_page_tapper(self, base_ms=100, rand_ms=50, enabled=True):
-        self._engine.inject_in_page_tapper(base_ms, rand_ms, enabled)
+    def inject_in_page_tapper(self, base_ms=165, rand_ms=35, enabled=True, adaptive=True):
+        self._engine.inject_in_page_tapper(base_ms, rand_ms, enabled, adaptive)
 
-    def set_tapper_rate(self, base_ms, rand_ms):
-        self._engine.set_tapper_rate(base_ms, rand_ms)
+    def set_tapper_rate(self, base_ms, rand_ms, adaptive=None):
+        self._engine.set_tapper_rate(base_ms, rand_ms, adaptive)
+
+    def set_tapper_adaptive(self, adaptive: bool):
+        if hasattr(self._engine, "set_tapper_adaptive"):
+            self._engine.set_tapper_adaptive(adaptive)
 
     def set_tapper_enabled(self, enabled):
         self._engine.set_tapper_enabled(enabled)

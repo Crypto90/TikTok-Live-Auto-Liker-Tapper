@@ -962,16 +962,20 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                     <div class="form-group">
                         <div class="form-label">
                             <span>Base Delay</span>
-                            <span id="delayValLbl" style="color: var(--primary);">100 ms</span>
+                            <span id="delayValLbl" style="color: var(--primary);">165 ms</span>
                         </div>
-                        <input type="range" class="form-range" id="delaySlider" min="50" max="500" value="100" oninput="onSpeedChange()">
+                        <input type="range" class="form-range" id="delaySlider" min="50" max="500" value="165" oninput="onSpeedChange()">
                     </div>
                     <div class="form-group">
                         <div class="form-label">
                             <span>Randomization Jitter</span>
-                            <span id="randValLbl" style="color: var(--secondary);">50 ms</span>
+                            <span id="randValLbl" style="color: var(--secondary);">35 ms</span>
                         </div>
-                        <input type="range" class="form-range" id="randSlider" min="0" max="100" value="50" oninput="onSpeedChange()">
+                        <input type="range" class="form-range" id="randSlider" min="0" max="100" value="35" oninput="onSpeedChange()">
+                    </div>
+                    <div class="form-group" style="display: flex; align-items: center; gap: 8px; margin-bottom: 14px;">
+                        <input type="checkbox" id="adaptiveChk" checked style="accent-color: var(--primary); width: 16px; height: 16px; cursor: pointer;">
+                        <label for="adaptiveChk" style="margin: 0; cursor: pointer; font-size: 13px; color: var(--text-dim);">Adaptive Rate (Auto-Maximize Confirmed %)</label>
                     </div>
                     <button class="btn btn-primary" id="saveSpeedBtn" onclick="saveSettings()">Save Rates</button>
                 </div>
@@ -1532,6 +1536,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                 const data = await res.json();
                 if (data.like_delay_ms) document.getElementById('delaySlider').value = data.like_delay_ms;
                 if (data.randomization_ms !== undefined) document.getElementById('randSlider').value = data.randomization_ms;
+                if (data.adaptive_rate !== undefined) document.getElementById('adaptiveChk').checked = !!data.adaptive_rate;
                 onSpeedChange();
             } catch (e) {}
         }
@@ -1539,11 +1544,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         async function saveSettings() {
             const like_delay_ms = parseInt(document.getElementById('delaySlider').value);
             const randomization_ms = parseInt(document.getElementById('randSlider').value);
+            const adaptive_rate = document.getElementById('adaptiveChk').checked;
             try {
                 const res = await fetch('/api/settings', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ like_delay_ms, randomization_ms })
+                    body: JSON.stringify({ like_delay_ms, randomization_ms, adaptive_rate })
                 });
                 if (res.ok) {
                     showToast('Tapping rates saved!');

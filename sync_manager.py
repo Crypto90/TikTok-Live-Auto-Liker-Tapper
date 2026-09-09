@@ -164,8 +164,9 @@ class SyncBundle:
         self.device_name = device_name or get_device_name()
         self.timestamp = time.time()
         self.settings = settings or {
-            "like_delay_ms": 100,
-            "randomization_ms": 50,
+            "like_delay_ms": 165,
+            "randomization_ms": 35,
+            "adaptive_rate": True,
             "updated_at": time.time()
         }
         # Normalize favorites: username -> { tapper_enabled, is_muted, updated_at }
@@ -662,8 +663,9 @@ class SyncManager(QObject):
 
     def _read_settings(self) -> dict:
         default_settings = {
-            "like_delay_ms": 100,
-            "randomization_ms": 50,
+            "like_delay_ms": 165,
+            "randomization_ms": 35,
+            "adaptive_rate": True,
             "updated_at": time.time()
         }
         if os.path.exists(self.settings_file):
