@@ -293,6 +293,24 @@ TAPPER_IN_PAGE_SCRIPT = """
                 var val = parseFloat(text.replace(/,/g, ''));
                 if (!isNaN(val)) stats.roomLikes = Math.max(stats.roomLikes, Math.round(val * mult));
             }
+
+            // Prune old MediaSource audio/video buffers to prevent memory bloat and audio stutter
+            if (window.__ttSourceBuffers) {
+                var v = document.querySelector('video');
+                if (v && typeof v.currentTime === 'number' && v.currentTime > 10) {
+                    var pEnd = v.currentTime - 10;
+                    for (var b = 0; b < window.__ttSourceBuffers.length; b++) {
+                        var sbObj = window.__ttSourceBuffers[b];
+                        if (sbObj && sbObj.sb && !sbObj.sb.updating) {
+                            try {
+                                if (sbObj.sb.buffered && sbObj.sb.buffered.length > 0 && sbObj.sb.buffered.start(0) < pEnd - 1) {
+                                    sbObj.sb.remove(0, pEnd);
+                                }
+                            } catch(e) {}
+                        }
+                    }
+                }
+            }
         } catch(e) {}
     }
 
@@ -372,6 +390,18 @@ TAPPER_IN_PAGE_SCRIPT = """
 # macOS Native WebKit (WKWebView) Backend
 # ---------------------------------------------------------------------------
 if HAS_MAC_WEBKIT:
+    def _objc_to_py(obj):
+        """Recursively convert PyObjC collections to native Python dicts, lists, and primitives."""
+        if obj is None:
+            return None
+        if hasattr(obj, 'items'):
+            return {str(k): _objc_to_py(v) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)) or (hasattr(obj, '__iter__') and not isinstance(obj, (str, bytes))):
+            return [_objc_to_py(x) for x in obj]
+        if isinstance(obj, (int, float, bool, str)):
+            return obj
+        return obj
+
     class _MacNavDelegate(AppKit.NSObject):
         """Bridge WKNavigationDelegate events to PyQt signals."""
         def initWithOwner_(self, owner):
@@ -461,6 +491,83 @@ if HAS_MAC_WEBKIT:
                 data_store = WebKit.WKWebsiteDataStore.defaultDataStore()
                 config.setWebsiteDataStore_(data_store)
 
+            # Media buffer manager & AudioSession setup:
+            # Prevents WebKit live audio stuttering and memory bloat by tracking SourceBuffers
+            # and periodically evicting past media chunks (> 10s old) from WebKit's memory.
+            buffer_mgr_js = """
+            (function() {
+                if (window.__tiktokMediaBufferManagerInstalled) return;
+                window.__tiktokMediaBufferManagerInstalled = true;
+
+                try {
+                    if (navigator.audioSession) {
+                        navigator.audioSession.type = 'playback';
+                    }
+                } catch(e) {}
+
+                window.__ttSourceBuffers = window.__ttSourceBuffers || [];
+                if (typeof MediaSource !== 'undefined') {
+                    var origAdd = MediaSource.prototype.addSourceBuffer;
+                    MediaSource.prototype.addSourceBuffer = function(type) {
+                        var sb = origAdd.apply(this, arguments);
+                        window.__ttSourceBuffers.push({ sb: sb, type: type });
+                        return sb;
+                    };
+                }
+
+                function maintainBuffers() {
+                    var video = document.querySelector('video');
+                    if (!video || video.paused) return;
+
+                    var curTime = video.currentTime;
+                    if (typeof curTime !== 'number' || curTime <= 0) return;
+
+                    var pruneEnd = curTime - 10;
+                    if (pruneEnd > 0 && window.__ttSourceBuffers) {
+                        for (var i = 0; i < window.__ttSourceBuffers.length; i++) {
+                            var item = window.__ttSourceBuffers[i];
+                            var sb = item.sb;
+                            if (!sb || sb.updating) continue;
+
+                            try {
+                                if (sb.buffered && sb.buffered.length > 0) {
+                                    var start = sb.buffered.start(0);
+                                    if (start < pruneEnd - 1) {
+                                        sb.remove(0, pruneEnd);
+                                    }
+                                }
+                            } catch(e) {}
+                        }
+                    }
+
+                    // Live drift monitor: ensure video doesn't lag behind live edge and cause audio stutter
+                    try {
+                        if (video.buffered && video.buffered.length > 0) {
+                            var liveEdge = video.buffered.end(video.buffered.length - 1);
+                            var drift = liveEdge - curTime;
+
+                            if (drift > 2.5 && drift <= 6.0) {
+                                if (video.playbackRate !== 1.05) video.playbackRate = 1.05;
+                            } else if (drift > 6.0) {
+                                video.currentTime = liveEdge - 0.8;
+                                if (video.playbackRate !== 1.0) video.playbackRate = 1.0;
+                            } else if (drift < 1.5) {
+                                if (video.playbackRate !== 1.0) video.playbackRate = 1.0;
+                            }
+                        }
+                    } catch(e) {}
+                }
+
+                setInterval(maintainBuffers, 4000);
+            })();
+            """
+            user_script = WebKit.WKUserScript.alloc().initWithSource_injectionTime_forMainFrameOnly_(
+                buffer_mgr_js,
+                WebKit.WKUserScriptInjectionTimeAtDocumentStart,
+                False
+            )
+            config.userContentController().addUserScript_(user_script)
+
             # Developer tools access
             try:
                 config.preferences().setValue_forKey_(True, "developerExtrasEnabled")
@@ -546,13 +653,20 @@ if HAS_MAC_WEBKIT:
                 clean_js = clean_js[7:].strip()
             def handler(res, err):
                 if callback:
-                    callback({'result': res})
+                    callback({'result': _objc_to_py(res)})
             self.wk.evaluateJavaScript_completionHandler_(clean_js, handler)
 
         def set_muted(self, muted):
             self._is_muted = muted
-            # Mute all media elements inside the DOM
-            js = f"document.querySelectorAll('video, audio').forEach(function(v) {{ v.muted = {'true' if muted else 'false'}; }});"
+            # Mute/unmute all media elements inside the DOM and ensure playback continues seamlessly
+            js = f"""(function() {{
+                document.querySelectorAll('video, audio').forEach(function(v) {{
+                    v.muted = {'true' if muted else 'false'};
+                    if (!{'true' if muted else 'false'} && v.paused) {{
+                        v.play().catch(function(){{}});
+                    }}
+                }});
+            }})();"""
             self.evaluate_js(js)
 
         def set_background_mode(self, is_background):

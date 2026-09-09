@@ -167,8 +167,13 @@ class UserListItem(QWidget):
         super().__init__()
         self.username = username
         self.has_avatar = False
+        self.is_tab_open = False
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setObjectName("userListItem")
+
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(5, 5, 5, 5)
+        layout.setContentsMargins(6, 4, 6, 4)
+        self.set_tab_open(False)
 
         self.avatar_label = QLabel()
         self.avatar_label.setFixedSize(32, 32)
@@ -293,6 +298,17 @@ class UserListItem(QWidget):
         painter.end()
         self.avatar_label.setStyleSheet("")
         self.avatar_label.setPixmap(target)
+
+    def set_tab_open(self, is_open):
+        self.is_tab_open = bool(is_open)
+        color = "#FE2C55" if is_open else "transparent"
+        self.setStyleSheet(f"""
+            #userListItem {{
+                border-left: 3px solid {color};
+                border-radius: 4px;
+                background-color: transparent;
+            }}
+        """)
 
 
 class SettingsManager:
@@ -624,6 +640,8 @@ class LiveTab(QWidget):
         if isinstance(res, str):
             try: res = json.loads(res)
             except Exception: res = {}
+        if hasattr(res, 'items') and not isinstance(res, dict):
+            res = dict(res)
         if not isinstance(res, dict):
             return
 
@@ -1521,6 +1539,7 @@ class TikTokAutoLikerApp(QMainWindow):
         is_enabled = self.favorites.get(username, True)
         is_muted = self.settings.setdefault("muted_users", {}).get(username, True)
         widget = UserListItem(username, is_enabled, is_muted)
+        widget.set_tab_open(username in self.active_streams)
         widget.toggle_btn.clicked.connect(lambda _, un=username: QTimer.singleShot(0, lambda: self.toggle_tapper(un)))
         widget.mute_btn.clicked.connect(lambda _, un=username: QTimer.singleShot(0, lambda: self.toggle_mute(un)))
         widget.del_btn.clicked.connect(lambda _, un=username: QTimer.singleShot(0, lambda: self.remove_favorite(un)))
@@ -1540,6 +1559,10 @@ class TikTokAutoLikerApp(QMainWindow):
         self.fav_list.setItemWidget(item, widget)
         self.fav_widgets[username] = widget
 
+    def _update_active_tab_indicators(self):
+        for un, widget in self.fav_widgets.items():
+            widget.set_tab_open(un in self.active_streams)
+
     def _on_user_clicked(self, item):
         username = item.data(Qt.ItemDataRole.UserRole)
         if username not in self.active_streams:
@@ -1555,6 +1578,12 @@ class TikTokAutoLikerApp(QMainWindow):
 
             self.active_streams[username] = tab
             self._update_waiting_tab()
+            self._update_active_tab_indicators()
+        else:
+            tab = self.active_streams[username]
+            idx = self.tabs.indexOf(tab)
+            if idx != -1:
+                self.tabs.setCurrentIndex(idx)
 
     def toggle_mute(self, username):
         if username in self.favorites:
@@ -1651,15 +1680,45 @@ class TikTokAutoLikerApp(QMainWindow):
                 font-weight: bold;
                 font-size: 15px;
             }
-            QLineEdit, QSpinBox, QListWidget {
+            QLineEdit, QSpinBox {
                 background-color: #2a2a2a;
                 border: 1px solid #444;
                 border-radius: 6px;
                 padding: 8px;
                 selection-background-color: #FE2C55;
             }
-            QLineEdit:focus, QSpinBox:focus, QListWidget:focus {
+            QLineEdit:focus, QSpinBox:focus {
                 border: 1px solid #25F4EE;
+            }
+            QListWidget {
+                background-color: #2a2a2a;
+                border: 1px solid #444;
+                border-radius: 6px;
+                padding: 4px;
+                outline: none;
+            }
+            QListWidget:focus {
+                border: 1px solid #444;
+                outline: none;
+            }
+            QListWidget::item {
+                background: transparent;
+                border: none;
+                border-radius: 4px;
+                padding: 0px;
+            }
+            QListWidget::item:selected {
+                background: transparent;
+                border: none;
+                outline: none;
+            }
+            QListWidget::item:focus {
+                background: transparent;
+                border: none;
+                outline: none;
+            }
+            QListWidget::item:hover {
+                background-color: rgba(255, 255, 255, 0.04);
             }
             QPushButton {
                 background-color: #FE2C55;
@@ -1838,6 +1897,8 @@ class TikTokAutoLikerApp(QMainWindow):
         fav_layout.addLayout(sort_bar)
 
         self.fav_list = QListWidget()
+        self.fav_list.setSelectionMode(QListWidget.SelectionMode.NoSelection)
+        self.fav_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.fav_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.fav_list.itemClicked.connect(self._on_user_clicked)
         for fav in self.favorites:
@@ -2345,6 +2406,7 @@ class TikTokAutoLikerApp(QMainWindow):
             tab.cleanup()
             tab.deleteLater()
         self.active_streams.clear()
+        self._update_active_tab_indicators()
 
         if hasattr(self, 'known_live'):
             self.known_live.clear()
@@ -2716,6 +2778,7 @@ class TikTokAutoLikerApp(QMainWindow):
             for un in sorted_usernames:
                 if un in self.fav_widgets:
                     self.fav_widgets[un].set_status(un in known_live)
+            self._update_active_tab_indicators()
         finally:
             self._rebuilding_sort = False
 
@@ -2768,6 +2831,7 @@ class TikTokAutoLikerApp(QMainWindow):
 
                 self.active_streams[username] = tab
                 self._update_waiting_tab()
+                self._update_active_tab_indicators()
         else:
             if avatar_url and username in self.fav_widgets:
                 if not self.fav_widgets[username].has_avatar and getattr(self.fav_widgets[username], 'current_avatar_url', None) != avatar_url:
@@ -2793,6 +2857,7 @@ class TikTokAutoLikerApp(QMainWindow):
                         del self.active_streams[username]
                         self._update_waiting_tab()
                         self._fallback_tab_selection()
+                        self._update_active_tab_indicators()
             else:
                 # If creator was not live, immediately update UI from "Checking..." to "Offline"
                 if username in self.fav_widgets:
@@ -2813,6 +2878,7 @@ class TikTokAutoLikerApp(QMainWindow):
         for username, tab in list(self.active_streams.items()):
             if tab == widget:
                 del self.active_streams[username]
+                self._update_active_tab_indicators()
                 break
 
         self.tabs.blockSignals(True)
@@ -2901,6 +2967,7 @@ class TikTokAutoLikerApp(QMainWindow):
             del self.active_streams[username]
             self._update_waiting_tab()
             self._fallback_tab_selection()
+            self._update_active_tab_indicators()
         finally:
             self.tabs.blockSignals(False)
             self._on_tab_changed(self.tabs.currentIndex())

@@ -124,11 +124,12 @@ class HeadlessStreamTab(QObject):
         if self.is_active:
             self.webview.get_tapper_stats(self._on_tapper_stats_result)
 
-    def _on_tapper_stats_result(self, result_dict):
         res = result_dict.get('result', {})
         if isinstance(res, str):
             try: res = json.loads(res)
             except Exception: res = {}
+        if hasattr(res, 'items') and not isinstance(res, dict):
+            res = dict(res)
         if not isinstance(res, dict):
             return
 
@@ -198,11 +199,12 @@ class HeadlessStreamTab(QObject):
         })();"""
         self.webview.evaluate_js(js, self._on_health_result)
 
-    def _on_health_result(self, result_dict):
         res = result_dict.get('result', {})
         if isinstance(res, str):
             try: res = json.loads(res)
             except Exception: res = {}
+        if hasattr(res, 'items') and not isinstance(res, dict):
+            res = dict(res)
         if isinstance(res, dict):
             if res.get("ended", False):
                 self.is_active = False
