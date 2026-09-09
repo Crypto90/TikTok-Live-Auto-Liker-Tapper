@@ -36,7 +36,7 @@ def _qt_message_handler(mode, context, message):
         return
 
 
-APP_VERSION = "v1.1.7"
+APP_VERSION = "v1.1.8"
 GITHUB_REPO = "Crypto90/TikTok-Live-Auto-Liker-Tapper"
 
 

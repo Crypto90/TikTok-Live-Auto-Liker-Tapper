@@ -93,7 +93,7 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          name: "v1.1.7 - Multi-Stream Grid View, Picture-in-Picture, Webhooks & Creator Profiles"
+          name: "v1.1.8 - Pure Video PiP, Continuous Likes Badge & Stream Stability"
           body_path: RELEASE_NOTES.md
           files: |
             release_assets/TikTokLiveAutoLiker.exe
