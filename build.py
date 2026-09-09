@@ -58,6 +58,7 @@ def build_macos():
         "--add-data=icon.png:.",
         "--add-data=webview_engine.py:.",
         "--add-data=sync_manager.py:.",
+        "--add-data=stats_manager.py:.",
         "--add-data=web_server.py:.",
         "--add-data=headless_runner.py:.",
     ]
@@ -98,6 +99,7 @@ def build_linux():
         "--add-data=icon.png:.",
         "--add-data=webview_engine.py:.",
         "--add-data=sync_manager.py:.",
+        "--add-data=stats_manager.py:.",
         "--add-data=web_server.py:.",
         "--add-data=headless_runner.py:.",
     ]
@@ -121,6 +123,7 @@ def build_windows():
         "--add-data=icon.png;.",
         "--add-data=webview_engine.py;.",
         "--add-data=sync_manager.py;.",
+        "--add-data=stats_manager.py;.",
         "--add-data=web_server.py;.",
         "--add-data=headless_runner.py;.",
     ]
