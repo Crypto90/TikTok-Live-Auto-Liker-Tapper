@@ -59,58 +59,66 @@ PIP_PLAYER_ISOLATE_JS = """(function() {
             width: 100vw !important;
             height: 100vh !important;
         }
-        /* Completely hide TikTok side navigation, top header, chat room, gift panel, bottom controls */
-        header, aside, nav, footer,
-        [data-e2e*="nav"], [data-e2e*="side"], [data-e2e*="header"], [data-e2e*="chat"],
-        [data-e2e*="comment"], [data-e2e*="footer"],
-        [class*="Header"], [class*="SideNav"], [class*="LeftContainer"],
-        [class*="ChatRoom"], [class*="ChatContainer"], [class*="CommentList"],
-        [class*="BottomControls"], [class*="Gift"], [class*="ShareContainer"],
-        [class*="FollowContainer"], [class*="DivSideNav"], [class*="ActionContainer"] {
-            display: none !important;
+        /* Hide all page content except the video player */
+        body > * {
             visibility: hidden !important;
-            opacity: 0 !important;
-            pointer-events: none !important;
-            width: 0 !important;
-            height: 0 !important;
-            max-width: 0 !important;
-            max-height: 0 !important;
         }
-        /* Reset containers holding the video player */
-        main, #main-content-live-room, div[class*="RoomContainer"], div[class*="PlayerContainer"], div[class*="VideoContainer"] {
+        /* Make ONLY the player container visible and full-bleed */
+        .xgplayer {
+            visibility: visible !important;
             position: fixed !important;
             top: 0 !important;
             left: 0 !important;
             width: 100vw !important;
             height: 100vh !important;
+            z-index: 2147483647 !important;
+            background: #000000 !important;
             margin: 0 !important;
             padding: 0 !important;
             border: none !important;
-            transform: none !important;
-            z-index: 1000 !important;
-            background: #000000 !important;
         }
-        /* Force the video element to fill 100% of the viewport */
-        video {
+        /* Hide all controls, bars, menus, and overlays inside the player */
+        .xgplayer * {
+            visibility: hidden !important;
+            display: none !important;
+        }
+        /* Make ONLY the video element visible and centered */
+        .xgplayer video, video {
+            visibility: visible !important;
+            display: block !important;
             position: fixed !important;
             top: 0 !important;
             left: 0 !important;
             width: 100vw !important;
             height: 100vh !important;
-            max-width: 100vw !important;
-            max-height: 100vh !important;
-            z-index: 2147483640 !important;
+            z-index: 2147483647 !important;
             object-fit: contain !important;
             background: #000000 !important;
             margin: 0 !important;
             padding: 0 !important;
             border: none !important;
         }
+        /* Completely suppress player controls, gift menus, chat, sidebars, headers, recommendations */
+        xg-bar, xg-controls, .xgplayer-controls, .xg-top-bar, .xg-left-bar, .xg-right-bar,
+        [class*="xgplayer-control"], [class*="xg-"], [class*="gift"], [class*="Gift"], .tiktok-1w5o2is,
+        [class*="SideNav"], [class*="BottomControls"], header, aside, footer,
+        [class*="Recommend"], [class*="recommend"], div[class*="DivSideNav"],
+        [class*="Chat"], [class*="chat"] {
+            display: none !important;
+            opacity: 0 !important;
+            visibility: hidden !important;
+            pointer-events: none !important;
+            width: 0 !important;
+            height: 0 !important;
+        }
     `;
     var v = document.querySelector('video');
     if (v) {
         var p = v.parentElement;
         while (p && p !== document.body) {
+            if (!p.hasAttribute('data-pip-orig-transform')) {
+                p.setAttribute('data-pip-orig-transform', p.style.transform || '');
+            }
             p.style.transform = 'none';
             p.style.margin = '0';
             p.style.padding = '0';
@@ -122,6 +130,12 @@ PIP_PLAYER_ISOLATE_JS = """(function() {
 PIP_PLAYER_RESTORE_JS = """(function() {
     var el = document.getElementById('__tiktok_pip_isolated_player__');
     if (el) el.remove();
+    var elements = document.querySelectorAll('[data-pip-orig-transform]');
+    for (var i = 0; i < elements.length; i++) {
+        var el2 = elements[i];
+        el2.style.transform = el2.getAttribute('data-pip-orig-transform');
+        el2.removeAttribute('data-pip-orig-transform');
+    }
 })();"""
 
 
@@ -376,24 +390,6 @@ TAPPER_IN_PAGE_SCRIPT = """
                 var val = parseFloat(text.replace(/,/g, ''));
                 if (!isNaN(val)) stats.roomLikes = Math.max(stats.roomLikes, Math.round(val * mult));
             }
-
-            // Prune old MediaSource audio/video buffers to prevent memory bloat and audio stutter
-            if (window.__ttSourceBuffers) {
-                var v = document.querySelector('video');
-                if (v && typeof v.currentTime === 'number' && v.currentTime > 10) {
-                    var pEnd = v.currentTime - 10;
-                    for (var b = 0; b < window.__ttSourceBuffers.length; b++) {
-                        var sbObj = window.__ttSourceBuffers[b];
-                        if (sbObj && sbObj.sb && !sbObj.sb.updating) {
-                            try {
-                                if (sbObj.sb.buffered && sbObj.sb.buffered.length > 0 && sbObj.sb.buffered.start(0) < pEnd - 1) {
-                                    sbObj.sb.remove(0, pEnd);
-                                }
-                            } catch(e) {}
-                        }
-                    }
-                }
-            }
         } catch(e) {}
     }
 
@@ -574,78 +570,19 @@ if HAS_MAC_WEBKIT:
                 data_store = WebKit.WKWebsiteDataStore.defaultDataStore()
                 config.setWebsiteDataStore_(data_store)
 
-            # Media buffer manager & AudioSession setup:
-            # Prevents WebKit live audio stuttering and memory bloat by tracking SourceBuffers
-            # and periodically evicting past media chunks (> 10s old) from WebKit's memory.
-            buffer_mgr_js = """
+            # Media AudioSession setup:
+            # Configures AudioSession playback type on macOS to prevent audiod sleep/throttling
+            audio_session_js = """
             (function() {
-                if (window.__tiktokMediaBufferManagerInstalled) return;
-                window.__tiktokMediaBufferManagerInstalled = true;
-
                 try {
                     if (navigator.audioSession) {
                         navigator.audioSession.type = 'playback';
                     }
                 } catch(e) {}
-
-                window.__ttSourceBuffers = window.__ttSourceBuffers || [];
-                if (typeof MediaSource !== 'undefined') {
-                    var origAdd = MediaSource.prototype.addSourceBuffer;
-                    MediaSource.prototype.addSourceBuffer = function(type) {
-                        var sb = origAdd.apply(this, arguments);
-                        window.__ttSourceBuffers.push({ sb: sb, type: type });
-                        return sb;
-                    };
-                }
-
-                function maintainBuffers() {
-                    var video = document.querySelector('video');
-                    if (!video || video.paused) return;
-
-                    var curTime = video.currentTime;
-                    if (typeof curTime !== 'number' || curTime <= 0) return;
-
-                    var pruneEnd = curTime - 10;
-                    if (pruneEnd > 0 && window.__ttSourceBuffers) {
-                        for (var i = 0; i < window.__ttSourceBuffers.length; i++) {
-                            var item = window.__ttSourceBuffers[i];
-                            var sb = item.sb;
-                            if (!sb || sb.updating) continue;
-
-                            try {
-                                if (sb.buffered && sb.buffered.length > 0) {
-                                    var start = sb.buffered.start(0);
-                                    if (start < pruneEnd - 1) {
-                                        sb.remove(0, pruneEnd);
-                                    }
-                                }
-                            } catch(e) {}
-                        }
-                    }
-
-                    // Live drift monitor: ensure video doesn't lag behind live edge and cause audio stutter
-                    try {
-                        if (video.buffered && video.buffered.length > 0) {
-                            var liveEdge = video.buffered.end(video.buffered.length - 1);
-                            var drift = liveEdge - curTime;
-
-                            if (drift > 2.5 && drift <= 6.0) {
-                                if (video.playbackRate !== 1.05) video.playbackRate = 1.05;
-                            } else if (drift > 6.0) {
-                                video.currentTime = liveEdge - 0.8;
-                                if (video.playbackRate !== 1.0) video.playbackRate = 1.0;
-                            } else if (drift < 1.5) {
-                                if (video.playbackRate !== 1.0) video.playbackRate = 1.0;
-                            }
-                        }
-                    } catch(e) {}
-                }
-
-                setInterval(maintainBuffers, 4000);
             })();
             """
             user_script = WebKit.WKUserScript.alloc().initWithSource_injectionTime_forMainFrameOnly_(
-                buffer_mgr_js,
+                audio_session_js,
                 WebKit.WKUserScriptInjectionTimeAtDocumentStart,
                 False
             )

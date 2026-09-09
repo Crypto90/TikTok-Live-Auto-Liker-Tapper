@@ -673,6 +673,23 @@ class PipWindow(QDialog):
         self.hud = PipHudOverlay(self)
         self.hud.raise_()
 
+        # Mini Likes Badge (visible continuously when top bar / HUD is hidden)
+        self.mini_like_badge = QLabel(self)
+        self.mini_like_badge.setText("❤️ 0")
+        self.mini_like_badge.setStyleSheet("""
+            QLabel {
+                background-color: rgba(18, 20, 30, 0.78);
+                color: #ff2d55;
+                font-size: 11px;
+                font-weight: bold;
+                padding: 4px 10px;
+                border-radius: 12px;
+                border: 1px solid rgba(255, 255, 255, 0.15);
+            }
+        """)
+        self.mini_like_badge.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.mini_like_badge.hide()
+
         # Auto-hide HUD after 3.5s of inactivity
         self.hide_timer = QTimer(self)
         self.hide_timer.setSingleShot(True)
@@ -680,7 +697,7 @@ class PipWindow(QDialog):
 
         # Periodic enforcer to ensure clean video player mode persists across stream buffer switches
         self.enforce_timer = QTimer(self)
-        self.enforce_timer.setInterval(2500)
+        self.enforce_timer.setInterval(10000)
         self.enforce_timer.timeout.connect(self._enforce_clean_player)
 
         self.setMouseTracking(True)
@@ -692,8 +709,12 @@ class PipWindow(QDialog):
         x = (self.width() - w) // 2
         self.hud.setGeometry(x, 12, w, 34)
         self.hud.raise_()
+        self.mini_like_badge.move(12, 12)
+        self.mini_like_badge.adjustSize()
+        self.mini_like_badge.raise_()
 
     def _show_hud(self):
+        self.mini_like_badge.hide()
         self.hud.show()
         self.hud.raise_()
         self.hide_timer.start(3500)
@@ -703,6 +724,8 @@ class PipWindow(QDialog):
             self.hide_timer.start(2000)
             return
         self.hud.hide()
+        self.mini_like_badge.show()
+        self.mini_like_badge.raise_()
 
     def enterEvent(self, event):
         super().enterEvent(event)
@@ -733,6 +756,7 @@ class PipWindow(QDialog):
         webview.show()
         if hasattr(self.live_tab, 'webview'):
             self.live_tab.webview.set_pip_mode(True)
+        QTimer.singleShot(1500, self._enforce_clean_player)
         self.enforce_timer.start()
         self._reposition_hud()
         self._show_hud()
@@ -754,6 +778,11 @@ class PipWindow(QDialog):
 
     def update_likes(self, verified_likes):
         self.hud.update_likes(verified_likes)
+        self.mini_like_badge.setText(f"❤️ {verified_likes:,}")
+        self.mini_like_badge.adjustSize()
+        if self.hud.isHidden():
+            self.mini_like_badge.show()
+            self.mini_like_badge.raise_()
 
     def _on_vol_changed(self, v):
         if hasattr(self.live_tab, 'set_volume'):
