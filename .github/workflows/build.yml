@@ -93,7 +93,7 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          name: "v1.1.9 - Bidirectional Mute Sync & Notification Fixes"
+          name: "v1.2.0 - Adaptive Like Throttling & 90%+ Confirmation Rate"
           body_path: RELEASE_NOTES.md
           files: |
             release_assets/TikTokLiveAutoLiker.exe

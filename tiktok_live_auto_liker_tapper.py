@@ -36,7 +36,7 @@ def _qt_message_handler(mode, context, message):
         return
 
 
-APP_VERSION = "v1.1.9"
+APP_VERSION = "v1.2.0"
 GITHUB_REPO = "Crypto90/TikTok-Live-Auto-Liker-Tapper"
 
 
@@ -346,13 +346,20 @@ class SettingsManager:
     @staticmethod
     def load_settings():
         default_settings = {
-            "like_delay_ms": 100,
-            "randomization_ms": 50
+            "like_delay_ms": 165,
+            "randomization_ms": 35,
+            "adaptive_rate": True
         }
         if os.path.exists(SETTINGS_FILE):
             try:
                 with open(SETTINGS_FILE, 'r') as f:
                     settings = json.load(f)
+                    # Migrate legacy defaults (100ms/50ms) to optimal 90%+ confirmed sweet spot (165ms/35ms)
+                    if settings.get("like_delay_ms") in (100, 50) and settings.get("randomization_ms") == 50:
+                        settings["like_delay_ms"] = 165
+                        settings["randomization_ms"] = 35
+                    if "adaptive_rate" not in settings:
+                        settings["adaptive_rate"] = True
                     default_settings.update(settings)
             except Exception:
                 pass
@@ -1272,11 +1279,11 @@ class LiveTab(QWidget):
             self._live_rate = 0.0
 
         if self.tapper_enabled and self._is_background and dt >= 0.8:
-            base = self.settings.get("like_delay_ms", 100)
-            rand = self.settings.get("randomization_ms", 50)
+            base = self.settings.get("like_delay_ms", 165)
+            rand = self.settings.get("randomization_ms", 35)
             avg_delay_ms = max(40, base + (rand // 2))
             expected = int(round((dt * 1000.0) / avg_delay_ms))
-            needed = max(0, expected - delta_d)
+            needed = max(0, min(10, expected - delta_d))
             if needed > 0:
                 self.webview.burst_tapper(needed)
         elif self.tapper_enabled and not self._is_background and delta_d == 0 and dt >= 1.5:
@@ -1298,7 +1305,9 @@ class LiveTab(QWidget):
         self.lbl_timer.setText(f"⏱️ <b>{time_str}</b>")
 
         rate_pct = round((verified / max(1, dispatched)) * 100.0, 1) if dispatched > 0 else 100.0
-        self.lbl_confirmed.setText(f"📶 <b>{rate_pct}% Confirmed</b>")
+        cur_delay = res.get('currentDelay')
+        delay_info = f" ({cur_delay}ms)" if cur_delay else ""
+        self.lbl_confirmed.setText(f"📶 <b>{rate_pct}% Confirmed</b>{delay_info}")
 
         # Update tab text dynamically
         if self.tabs_widget:
@@ -1317,9 +1326,10 @@ class LiveTab(QWidget):
             self.webview.set_muted(self.is_muted)
             self.webview.set_volume(self.volume / 100.0)
             self.webview.evaluate_js("(function() { var v = document.querySelector('video'); if (v && v.paused) v.play().catch(function(){}); })();")
-            base = self.settings.get("like_delay_ms", 100)
-            rand = self.settings.get("randomization_ms", 50)
-            self.webview.inject_in_page_tapper(base, rand, enabled=self.tapper_enabled)
+            base = self.settings.get("like_delay_ms", 165)
+            rand = self.settings.get("randomization_ms", 35)
+            adaptive = self.settings.get("adaptive_rate", True)
+            self.webview.inject_in_page_tapper(base, rand, enabled=self.tapper_enabled, adaptive=adaptive)
 
             if self.stats_mgr and not self.session_id:
                 self.session_id = self.stats_mgr.start_session(self.username)
@@ -1349,9 +1359,10 @@ class LiveTab(QWidget):
 
     def update_settings(self, settings):
         self.settings = settings
-        base = self.settings.get("like_delay_ms", 100)
-        rand = self.settings.get("randomization_ms", 50)
-        self.webview.set_tapper_rate(base, rand)
+        base = self.settings.get("like_delay_ms", 165)
+        rand = self.settings.get("randomization_ms", 35)
+        adaptive = self.settings.get("adaptive_rate", True)
+        self.webview.set_tapper_rate(base, rand, adaptive=adaptive)
 
     # --- Stream Health Monitor ---
 
@@ -3263,7 +3274,7 @@ class TikTokAutoLikerApp(QMainWindow):
         # Base Delay
         self.delay_slider = QSlider(Qt.Orientation.Horizontal)
         self.delay_slider.setRange(50, 500)
-        self.delay_slider.setValue(self.settings.get("like_delay_ms", 50))
+        self.delay_slider.setValue(self.settings.get("like_delay_ms", 165))
         self.delay_val_lbl = QLabel(f"{self.delay_slider.value()} ms")
         self.delay_val_lbl.setMinimumWidth(45)
 
@@ -3278,7 +3289,7 @@ class TikTokAutoLikerApp(QMainWindow):
         # Randomization
         self.rand_slider = QSlider(Qt.Orientation.Horizontal)
         self.rand_slider.setRange(0, 100)
-        self.rand_slider.setValue(self.settings.get("randomization_ms", 50))
+        self.rand_slider.setValue(self.settings.get("randomization_ms", 35))
         self.rand_val_lbl = QLabel(f"{self.rand_slider.value()} ms")
         self.rand_val_lbl.setMinimumWidth(45)
 
@@ -3290,8 +3301,16 @@ class TikTokAutoLikerApp(QMainWindow):
             lambda v: (self.rand_val_lbl.setText(f"{v} ms"), self.save_settings_ui())
         )
 
+        # Adaptive Rate Toggle
+        self.chk_adaptive = QCheckBox("Adaptive Rate (Auto-Maximize Confirmed %)")
+        self.chk_adaptive.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.chk_adaptive.setChecked(self.settings.get("adaptive_rate", True))
+        self.chk_adaptive.setStyleSheet("color: #a0aec0; font-size: 12px;")
+        self.chk_adaptive.stateChanged.connect(lambda _: self.save_settings_ui())
+
         settings_layout.addRow("Base Delay:", delay_layout)
         settings_layout.addRow("Randomization:", rand_layout)
+        settings_layout.addRow("", self.chk_adaptive)
 
         settings_container_layout.addWidget(settings_box)
         left_layout.addWidget(settings_container)
@@ -3865,6 +3884,8 @@ class TikTokAutoLikerApp(QMainWindow):
     def save_settings_ui(self):
         self.settings["like_delay_ms"] = self.delay_slider.value()
         self.settings["randomization_ms"] = self.rand_slider.value()
+        if hasattr(self, 'chk_adaptive'):
+            self.settings["adaptive_rate"] = self.chk_adaptive.isChecked()
         self.settings["updated_at"] = time.time()
         SettingsManager.save_settings(self.settings)
 
@@ -3874,8 +3895,10 @@ class TikTokAutoLikerApp(QMainWindow):
             self.sync_mgr.record_local_change()
 
     def reset_settings_to_default(self):
-        self.delay_slider.setValue(50)
-        self.rand_slider.setValue(50)
+        self.delay_slider.setValue(165)
+        self.rand_slider.setValue(35)
+        if hasattr(self, 'chk_adaptive'):
+            self.chk_adaptive.setChecked(True)
 
     def backup_data(self):
         file_path, _ = QFileDialog.getSaveFileName(self, "Save Backup", "", "Zip Files (*.zip)")
@@ -3925,8 +3948,10 @@ class TikTokAutoLikerApp(QMainWindow):
                 for fav in self.favorites:
                     self._add_user_list_item(fav)
                 self._sort_list()
-                self.delay_slider.setValue(self.settings.get("like_delay_ms", 100))
-                self.rand_slider.setValue(self.settings.get("randomization_ms", 50))
+                self.delay_slider.setValue(self.settings.get("like_delay_ms", 165))
+                self.rand_slider.setValue(self.settings.get("randomization_ms", 35))
+                if hasattr(self, 'chk_adaptive'):
+                    self.chk_adaptive.setChecked(self.settings.get("adaptive_rate", True))
                 self._update_status_label()
                 if hasattr(self, 'sync_mgr'):
                     self.sync_mgr.record_local_change()
@@ -3960,8 +3985,10 @@ class TikTokAutoLikerApp(QMainWindow):
 
             self.delay_slider.blockSignals(True)
             self.rand_slider.blockSignals(True)
-            self.delay_slider.setValue(self.settings.get("like_delay_ms", 100))
-            self.rand_slider.setValue(self.settings.get("randomization_ms", 50))
+            self.delay_slider.setValue(self.settings.get("like_delay_ms", 165))
+            self.rand_slider.setValue(self.settings.get("randomization_ms", 35))
+            if hasattr(self, 'chk_adaptive'):
+                self.chk_adaptive.setChecked(self.settings.get("adaptive_rate", True))
             self.delay_val_lbl.setText(f"{self.delay_slider.value()} ms")
             self.rand_val_lbl.setText(f"{self.rand_slider.value()} ms")
             self.delay_slider.blockSignals(False)
