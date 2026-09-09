@@ -669,6 +669,21 @@ if HAS_MAC_WEBKIT:
             }})();"""
             self.evaluate_js(js)
 
+        def set_volume(self, volume: float):
+            """Set audio volume from 0.0 (silent/muted) to 1.0 (max) across all DOM media elements."""
+            self._volume = max(0.0, min(1.0, float(volume)))
+            self._is_muted = (self._volume <= 0.001)
+            js = f"""(function() {{
+                document.querySelectorAll('video, audio').forEach(function(v) {{
+                    v.volume = {self._volume};
+                    v.muted = {'true' if self._is_muted else 'false'};
+                    if (!{'true' if self._is_muted else 'false'} && v.paused) {{
+                        v.play().catch(function(){{}});
+                    }}
+                }});
+            }})();"""
+            self.evaluate_js(js)
+
         def set_background_mode(self, is_background):
             """Reduce video rendering and media buffer allocation in background tabs without stalling player pipelines."""
             if is_background:
@@ -893,6 +908,18 @@ if HAS_WIN_WEBVIEW2:
             js = f"document.querySelectorAll('video, audio').forEach(function(v) {{ v.muted = {'true' if muted else 'false'}; }});"
             self.evaluate_js(js)
 
+        def set_volume(self, volume: float):
+            """Set audio volume from 0.0 to 1.0 for WebView2."""
+            self._volume = max(0.0, min(1.0, float(volume)))
+            self._is_muted = (self._volume <= 0.001)
+            if self._core_wv2:
+                try:
+                    self._core_wv2.IsMuted = self._is_muted
+                except Exception:
+                    pass
+            js = f"document.querySelectorAll('video, audio').forEach(function(v) {{ v.volume = {self._volume}; v.muted = {'true' if self._is_muted else 'false'}; }});"
+            self.evaluate_js(js)
+
         def set_background_mode(self, is_background):
             if is_background:
                 js = """
@@ -1069,6 +1096,15 @@ if HAS_QT_WEBENGINE:
             js = f"document.querySelectorAll('video, audio').forEach(function(v) {{ v.muted = {'true' if muted else 'false'}; }});"
             self.evaluate_js(js)
 
+        def set_volume(self, volume: float):
+            """Set audio volume from 0.0 to 1.0 for QtWebEngine."""
+            self._volume = max(0.0, min(1.0, float(volume)))
+            self._is_muted = (self._volume <= 0.001)
+            if self.web and self.web.page():
+                self.web.page().setAudioMuted(self._is_muted)
+            js = f"document.querySelectorAll('video, audio').forEach(function(v) {{ v.volume = {self._volume}; v.muted = {'true' if self._is_muted else 'false'}; }});"
+            self.evaluate_js(js)
+
         def set_background_mode(self, is_background):
             if is_background:
                 js = """
@@ -1243,6 +1279,10 @@ class UniversalWebView(QWidget):
 
     def set_muted(self, muted):
         self._engine.set_muted(muted)
+
+    def set_volume(self, volume: float):
+        if hasattr(self._engine, "set_volume"):
+            self._engine.set_volume(volume)
 
     def set_background_mode(self, is_background):
         self._engine.set_background_mode(is_background)

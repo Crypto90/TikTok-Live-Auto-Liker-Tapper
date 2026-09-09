@@ -1,29 +1,40 @@
-# 🚀 TikTok Live Auto Liker v1.1.6
+# 🚀 TikTok Live Auto Liker v1.1.7
 
-A performance and stability release delivering **macOS live stats & verified like counting fixes**, **elimination of macOS live audio stuttering & buffer bloat**, and **Favorites list tab indicators with clean selection states**.
+A major feature release introducing **Multi-Stream Grid View**, **Picture-in-Picture (PiP) Floating Players**, **Per-Stream Volume Controls**, **Discord & Telegram Webhook Alerts**, **Native Desktop Notifications**, **Creator Lifetime Profiles**, and **JSON Data Export**.
 
 ---
 
-## 🌟 What's New in v1.1.6
+## 🌟 What's New in v1.1.7
 
-### 📊 Fixed macOS Live Stats & Verified Like Counting
-- **PyObjC Type Normalization**: On macOS, Apple WebKit (`WKWebView.evaluateJavaScript:completionHandler:`) returns Objective-C collections (`__NSDictionaryM`, `__NSArrayM`, `objc.pyobjc_unicode`) rather than standard Python dictionaries. This caused Python's `isinstance(res, dict)` check in the live stats callback to fail, silently dropping stats on every second.
-- **Real-Time Stats Restored**: Live stats now update dynamically on macOS:
-  - Verified Likes counter increments with every server acknowledgment.
-  - Live Tap Rate (`⚡ X.X/s`) reflects accurate real-time speeds.
-  - Active Session Duration (`⏱️ mm:ss`) counts continuously.
-  - Verification Rate (`📶 100% Confirmed`) and tab titles (`(❤️ count)`) stay fully in sync.
+### ⊞ Multi-Stream Grid / Matrix View
+- **Simultaneous Multi-Stream Monitoring**: Seamlessly toggle between classic Tabbed View and the new **Multi-Stream Grid View** (`⊞ Grid View`) located in the upper-right corner of the tab bar.
+- **Dynamic 2 & 3 Column Responsive Grid**: Displays all actively streaming creators side-by-side in responsive cards with independent volume sliders, PiP detach buttons, live like counters, and quick-close buttons.
+- **Zero Interruption & Memory Efficient**: Tapping loops continue running in-page without reloading or dropping stream connections when switching between Grid and Tab views.
 
-### 🔊 Eliminated macOS Live Audio Stuttering & Buffer Bloat
-- **Automated MediaSource Past-Buffer Eviction**: TikTok Live streams media via HTML5 `MediaSource` (MSE) using separate video and audio `SourceBuffer` tracks. Because TikTok's web player never purges past segments, WebKit's media memory previously grew unbounded over 10–20+ minutes of playback, leading to CoreAudio buffer underruns and severe audio crackling/stuttering.
-- **Continuous Sliding Window Cleaner**: Injected an automated media buffer cleaner running every 4 seconds that safely calls `sourceBuffer.remove(0, currentTime - 10)` to purge past audio and video chunks from WebKit's memory. Clamps memory to a constant, lean ~13-second window forever.
-- **AudioSession Playback Mode**: Automatically configures `navigator.audioSession.type = 'playback'` to prevent the macOS audio daemon (`audiod`) from throttling or lowering thread priority of WebKit's audio pipeline.
-- **Live Clock Drift Correction**: Continuously monitors the live edge buffer gap (`video.buffered.end - video.currentTime`). If playback lags by 2.5–6.0s, it gently catches up at 1.05x speed without audio pitch distortion; if drift exceeds 6s, it immediately jumps to the live edge.
+### ⧉ Picture-in-Picture (PiP) Floating Mini-Player
+- **Always-on-Top Floating Video Window**: Pop any active live stream out into an independent floating window (`⧉ PiP`) that stays on top of all other desktop applications while you browse, game, or work.
+- **Integrated Controls**: Displays the streamer's name, live like count, and an instant `⤓ Dock` button to return the stream directly to its tab or grid slot.
+- **Seamless Tapping Continuity**: Webview detachment retains all active media streams and automated tapping scripts uninterrupted.
 
-### 🎨 Clean Favorites List Selection & Active Tab Indicators
-- **Removed Solid Pink Row Selection**: Removed `selection-background-color: #FE2C55;` and configured `NoSelection` mode with transparent item selection/focus styling. Clicking a favorite no longer leaves an intrusive solid pink highlight that masks the pink "LIVE" text and active heart icon.
-- **Sleek Active Tab Left-Border Indicator**: Streamers with currently open tabs are now marked with a clean 3px TikTok-pink left border (`border-left: 3px solid #FE2C55;`) in the Favorites list. When a tab closes or the stream ends, the border cleanly transitions back to transparent.
-- **Quick-Switch to Open Streams**: Clicking a favorite whose live stream tab is already open now immediately focuses that streamer's active tab instead of doing nothing.
+### 🔊 Per-Stream Volume Controls & Audio Normalization
+- **Individual Volume Sliders (0–100%)**: Adjust volume independently for every streamer with inline sliders in both tab header bars and grid cards.
+- **Cross-Engine Audio Control**: Native volume adjustment across Apple WebKit (macOS), Microsoft Edge WebView2 (Windows), and QtWebEngine (Linux).
+- **Persistent Volume Preferences**: Individual volume levels are remembered between sessions in settings.
+
+### 🔔 Native Desktop Notifications & Webhooks (Discord & Telegram)
+- **Native OS Toast Notifications**: Receive native Notification Center (macOS) and Action Center (Windows/Linux) toasts when a favorite creator starts streaming or crosses like milestones.
+- **Discord Webhook Alerts**: Configurable Discord notifications with rich embedded cards, streamer profile avatars, direct stream links, and milestone counters.
+- **Telegram Bot Notifications**: Instant push alerts to your Telegram chat or channel whenever creators go live.
+- **Configurable Thresholds & Test Connectivity**: Access the new **🔔 Alerts & Webhooks** dialog from the data panel to configure webhook URLs, test message delivery, and toggle notifications.
+
+### 👤 Creator Lifetime Profiles & Detailed History
+- **Interactive Avatar Click**: Clicking any creator's avatar in the Favorites list opens their **Creator Profile Dialog**.
+- **Lifetime Aggregated KPI Cards**: View total verified likes delivered, total taps dispatched, server delivery rate, total streaming duration, first-seen date, and number of sessions.
+- **Complete Session History**: Interactive data table displaying every historical session with date/time, verified likes, tap rate, and session outcome.
+- **One-Click Stream Launcher**: Directly jump into an open tab or launch the streamer's live room right from their profile card.
+
+### 📥 JSON & CSV Session Analytics Export
+- **One-Click JSON Export**: Beside CSV export, the Analytics dialog now includes **📥 Export JSON**, providing a structured export containing overall KPI aggregates and individual session telemetry for custom reporting or backup.
 
 ---
 
@@ -43,4 +54,4 @@ Simply download the archive or executable for your platform and replace your pre
 
 ## 💖 Support
 
-[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/K3K314GUP?ref=tiktok_live_auto_liker_release_116)
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/K3K314GUP?ref=tiktok_live_auto_liker_release_117)

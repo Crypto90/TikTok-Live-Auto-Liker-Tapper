@@ -286,6 +286,50 @@ class StatsManager:
                 )
             return "\n".join(lines)
 
+    def export_json(self) -> str:
+        with self._lock:
+            payload = {
+                "export_date": datetime.now(timezone.utc).isoformat(),
+                "all_time": self.data.get("all_time", {}),
+                "streamers": self.data.get("streamers", {}),
+                "sessions": self.data.get("sessions", []),
+                "daily_summary": self.data.get("daily_summary", {})
+            }
+            return json.dumps(payload, indent=2, ensure_ascii=False)
+
+    def get_streamer_profile(self, username: str) -> dict:
+        with self._lock:
+            st_data = self.data.get("streamers", {}).get(username, {})
+            creator_sessions = [s for s in self.data.get("sessions", []) if s.get("username") == username]
+            creator_sessions.sort(key=lambda x: x.get("started_at", 0), reverse=True)
+
+            active_s = None
+            for s in self._active_sessions.values():
+                if s.get("username") == username:
+                    active_s = s
+                    break
+
+            verified = st_data.get("verified_likes", 0) + (active_s.get("verified_likes", 0) if active_s else 0)
+            taps = st_data.get("taps_dispatched", 0) + (active_s.get("taps_dispatched", 0) if active_s else 0)
+            duration = st_data.get("total_duration_seconds", 0) + (active_s.get("duration_seconds", 0) if active_s else 0)
+            sessions_count = st_data.get("sessions_count", 0) + (1 if active_s else 0)
+            delivery_rate = round((verified / max(1, taps)) * 100.0, 1) if taps > 0 else 100.0
+            last_active = st_data.get("last_active", 0)
+            first_active = creator_sessions[-1].get("started_at", 0) if creator_sessions else (active_s.get("started_at", 0) if active_s else 0)
+
+            return {
+                "username": username,
+                "verified_likes": verified,
+                "taps_dispatched": taps,
+                "total_duration_seconds": duration,
+                "sessions_count": sessions_count,
+                "delivery_rate": min(100.0, delivery_rate),
+                "first_active": first_active,
+                "last_active": last_active,
+                "sessions": creator_sessions[:25]
+            }
+
+
     # --- Multi-Device Sync Helpers ---
 
     def get_sync_payload(self) -> dict:

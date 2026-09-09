@@ -10,6 +10,9 @@ import random
 import shutil
 import math
 import time
+import threading
+import urllib.request
+import urllib.parse
 from datetime import datetime, timezone
 
 from PyQt6.QtWidgets import (
@@ -17,7 +20,7 @@ from PyQt6.QtWidgets import (
     QLabel, QLineEdit, QPushButton, QListWidget, QSpinBox, QSlider,
     QTabWidget, QTabBar, QSplitter, QGroupBox, QFormLayout, QMessageBox, QListWidgetItem, QFrame, QFileDialog, QToolButton,
     QDialog, QComboBox, QCheckBox, QRadioButton, QButtonGroup, QStackedWidget,
-    QTableWidget, QTableWidgetItem, QHeaderView, QGridLayout
+    QTableWidget, QTableWidgetItem, QHeaderView, QGridLayout, QSystemTrayIcon, QScrollArea
 )
 from PyQt6.QtCore import Qt, QUrl, QTimer, pyqtSignal, QObject, pyqtSlot, QMetaObject, qInstallMessageHandler, QStandardPaths, QSize, QRect
 from PyQt6.QtGui import QPainter, QColor, QIcon, QPixmap, QPainterPath, QDesktopServices, QFont
@@ -33,7 +36,7 @@ def _qt_message_handler(mode, context, message):
         return
 
 
-APP_VERSION = "v1.1.6"
+APP_VERSION = "v1.1.7"
 GITHUB_REPO = "Crypto90/TikTok-Live-Auto-Liker-Tapper"
 
 
@@ -163,6 +166,8 @@ def make_heart_icon(size=20, color_hex="#FE2C55"):
 
 
 class UserListItem(QWidget):
+    avatar_clicked = pyqtSignal(str)
+
     def __init__(self, username, is_enabled=True, is_muted=True):
         super().__init__()
         self.username = username
@@ -178,9 +183,13 @@ class UserListItem(QWidget):
         self.avatar_label = QLabel()
         self.avatar_label.setFixedSize(32, 32)
         self.avatar_label.setStyleSheet("background-color: #333; border-radius: 16px;")
+        self.avatar_label.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.avatar_label.setToolTip("Click to view Lifetime Creator Profile")
+        self.avatar_label.mousePressEvent = lambda e: self.avatar_clicked.emit(self.username)
 
         self.name_label = QLabel(username)
         self.name_label.setStyleSheet("font-weight: bold; color: #E0E0E0; font-size: 9.5pt;")
+        self.name_label.setToolTip("Click to open stream • Click avatar for Lifetime Profile")
 
         self.status_label = QLabel("Checking...")
         self.status_label.setStyleSheet("color: #888; font-size: 8.5pt;")
@@ -534,11 +543,258 @@ class LiveChecker(QObject):
         self.queue.clear()
 
 
+
+class PipWindow(QDialog):
+    """Floating, always-on-top Picture-in-Picture mini player for a live stream."""
+    dock_back_requested = pyqtSignal(str)
+
+    def __init__(self, username, live_tab, parent=None):
+        super().__init__(parent)
+        self.username = username
+        self.live_tab = live_tab
+        self.setWindowTitle(f"PiP: @{self.username} — TikTok Live Auto Liker")
+        self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.WindowStaysOnTopHint)
+        self.resize(520, 340)
+        self.setMinimumSize(320, 200)
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #0e0f14;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        # Header bar
+        self.top_bar = QWidget(self)
+        self.top_bar.setFixedHeight(34)
+        self.top_bar.setStyleSheet("""
+            QWidget {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #1a1a26, stop:1 #13131c);
+                border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+            }
+            QLabel {
+                color: #e0e0e0;
+                font-size: 11px;
+            }
+        """)
+        tb_layout = QHBoxLayout(self.top_bar)
+        tb_layout.setContentsMargins(10, 0, 8, 0)
+        tb_layout.setSpacing(8)
+
+        lbl_pip_icon = QLabel("⧉", self.top_bar)
+        lbl_pip_icon.setStyleSheet("color: #25F4EE; font-size: 12px; font-weight: bold;")
+        tb_layout.addWidget(lbl_pip_icon)
+
+        self.lbl_title = QLabel(f"<b>@{self.username}</b>", self.top_bar)
+        self.lbl_title.setStyleSheet("color: #00f2fe; font-size: 11.5px;")
+        tb_layout.addWidget(self.lbl_title)
+
+        self.lbl_likes = QLabel("❤️ 0", self.top_bar)
+        self.lbl_likes.setStyleSheet("color: #ff2d55; font-size: 11px; font-weight: bold;")
+        tb_layout.addWidget(self.lbl_likes)
+
+        tb_layout.addStretch()
+
+        # Volume slider in PiP
+        self.slider_vol = QSlider(Qt.Orientation.Horizontal, self.top_bar)
+        self.slider_vol.setRange(0, 100)
+        self.slider_vol.setValue(self.live_tab.volume if hasattr(self.live_tab, 'volume') else 80)
+        self.slider_vol.setFixedWidth(65)
+        self.slider_vol.setStyleSheet("""
+            QSlider::groove:horizontal { border: none; height: 3px; background: #333647; border-radius: 1px; }
+            QSlider::sub-page:horizontal { background: #25F4EE; border-radius: 1px; }
+            QSlider::handle:horizontal { background: #ffffff; border: 1px solid #25F4EE; width: 8px; margin-top: -3px; margin-bottom: -3px; border-radius: 4px; }
+        """)
+        self.slider_vol.valueChanged.connect(self._on_vol_changed)
+        tb_layout.addWidget(self.slider_vol)
+
+        # Dock Back button
+        self.btn_dock = QPushButton("⤓ Dock Back", self.top_bar)
+        self.btn_dock.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_dock.setStyleSheet("""
+            QPushButton {
+                background-color: #25F4EE;
+                color: #121212;
+                font-size: 10px;
+                font-weight: bold;
+                padding: 3px 10px;
+                border-radius: 4px;
+            }
+            QPushButton:hover { background-color: #1ed1cb; }
+        """)
+        self.btn_dock.clicked.connect(self._request_dock_back)
+        tb_layout.addWidget(self.btn_dock)
+
+        layout.addWidget(self.top_bar)
+
+        # Video container
+        self.video_container = QWidget(self)
+        self.video_layout = QVBoxLayout(self.video_container)
+        self.video_layout.setContentsMargins(0, 0, 0, 0)
+        self.video_layout.setSpacing(0)
+        layout.addWidget(self.video_container, 1)
+
+    def attach_webview(self, webview):
+        self.video_layout.addWidget(webview)
+        webview.show()
+
+    def detach_webview(self):
+        w = self.video_layout.takeAt(0)
+        if w and w.widget():
+            wv = w.widget()
+            wv.setParent(None)
+            return wv
+        return None
+
+    def update_likes(self, verified_likes):
+        self.lbl_likes.setText(f"❤️ {verified_likes:,}")
+
+    def _on_vol_changed(self, v):
+        if hasattr(self.live_tab, 'set_volume'):
+            self.live_tab.set_volume(v)
+
+    def _request_dock_back(self):
+        self.dock_back_requested.emit(self.username)
+        self.close()
+
+    def closeEvent(self, event):
+        self.dock_back_requested.emit(self.username)
+        event.accept()
+
+
+class GridStreamCard(QFrame):
+    """Stream container card used in Multi-Stream Grid Mode."""
+    close_requested = pyqtSignal(str)
+    pip_requested = pyqtSignal(str)
+
+    def __init__(self, username, live_tab, parent=None):
+        super().__init__(parent)
+        self.username = username
+        self.live_tab = live_tab
+        self.setObjectName("gridCard")
+        self.setStyleSheet("""
+            QFrame#gridCard {
+                background-color: #171822;
+                border: 1px solid #282a3d;
+                border-radius: 8px;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        # Header bar
+        header = QWidget(self)
+        header.setFixedHeight(34)
+        header.setStyleSheet("""
+            QWidget {
+                background-color: #1a1b28;
+                border-top-left-radius: 7px;
+                border-top-right-radius: 7px;
+                border-bottom: 1px solid #282a3d;
+            }
+            QLabel {
+                color: #e0e0e0;
+                font-size: 11px;
+                font-weight: 500;
+            }
+        """)
+        h_layout = QHBoxLayout(header)
+        h_layout.setContentsMargins(10, 0, 8, 0)
+        h_layout.setSpacing(8)
+
+        lbl_live = QLabel("🔴", header)
+        lbl_live.setStyleSheet("font-size: 8px;")
+        h_layout.addWidget(lbl_live)
+
+        lbl_user = QLabel(f"<b>@{self.username}</b>", header)
+        lbl_user.setStyleSheet("color: #00f2fe; font-size: 11.5px;")
+        h_layout.addWidget(lbl_user)
+
+        self.lbl_likes = QLabel("❤️ 0", header)
+        self.lbl_likes.setStyleSheet("color: #ff2d55; font-size: 11px; font-weight: bold;")
+        h_layout.addWidget(self.lbl_likes)
+
+        h_layout.addStretch()
+
+        # Volume slider
+        self.slider_vol = QSlider(Qt.Orientation.Horizontal, header)
+        self.slider_vol.setRange(0, 100)
+        self.slider_vol.setValue(self.live_tab.volume if hasattr(self.live_tab, 'volume') else 80)
+        self.slider_vol.setFixedWidth(60)
+        self.slider_vol.setStyleSheet("""
+            QSlider::groove:horizontal { height: 3px; background: #333647; border-radius: 1px; }
+            QSlider::sub-page:horizontal { background: #25F4EE; border-radius: 1px; }
+            QSlider::handle:horizontal { background: #ffffff; border: 1px solid #25F4EE; width: 8px; margin-top: -3px; margin-bottom: -3px; border-radius: 4px; }
+        """)
+        self.slider_vol.valueChanged.connect(self._on_vol_changed)
+        h_layout.addWidget(self.slider_vol)
+
+        # PiP button
+        btn_pip = QToolButton(header)
+        btn_pip.setText("⧉")
+        btn_pip.setToolTip("Pop out Picture-in-Picture")
+        btn_pip.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_pip.setFixedSize(22, 22)
+        btn_pip.setStyleSheet("""
+            QToolButton { background: transparent; border: none; color: #25F4EE; font-size: 13px; font-weight: bold; border-radius: 11px; }
+            QToolButton:hover { background-color: rgba(37, 244, 238, 0.15); }
+        """)
+        btn_pip.clicked.connect(lambda: self.pip_requested.emit(self.username))
+        h_layout.addWidget(btn_pip)
+
+        # Close button
+        btn_close = QToolButton(header)
+        btn_close.setText("✕")
+        btn_close.setToolTip("Close Stream")
+        btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_close.setFixedSize(22, 22)
+        btn_close.setStyleSheet("""
+            QToolButton { background: transparent; border: none; color: #ff5a5a; font-size: 11px; font-weight: bold; border-radius: 11px; }
+            QToolButton:hover { background-color: rgba(255, 90, 90, 0.15); }
+        """)
+        btn_close.clicked.connect(lambda: self.close_requested.emit(self.username))
+        h_layout.addWidget(btn_close)
+
+        layout.addWidget(header)
+
+        # Container for the webview
+        self.view_container = QWidget(self)
+        self.view_layout = QVBoxLayout(self.view_container)
+        self.view_layout.setContentsMargins(0, 0, 0, 0)
+        self.view_layout.setSpacing(0)
+        layout.addWidget(self.view_container, 1)
+
+    def attach_webview(self, webview):
+        self.view_layout.addWidget(webview)
+        webview.show()
+
+    def detach_webview(self):
+        w = self.view_layout.takeAt(0)
+        if w and w.widget():
+            wv = w.widget()
+            wv.setParent(None)
+            return wv
+        return None
+
+    def _on_vol_changed(self, v):
+        if hasattr(self.live_tab, 'set_volume'):
+            self.live_tab.set_volume(v)
+
+    def update_likes(self, count):
+        self.lbl_likes.setText(f"❤️ {count:,}")
+
+
 class LiveTab(QWidget):
     stream_ended = pyqtSignal(str, str)
+    milestone_reached = pyqtSignal(str, int, int)  # (username, count, duration_seconds)
 
     # Recycle threshold: after 60 minutes, reload the stream to clear caches
     _RECYCLE_THRESHOLD_S = 60 * 60
+    STANDARD_MILESTONES = [10000, 25000, 50000, 100000, 250000, 500000, 1000000]
 
     def __init__(self, username, settings, tapper_enabled=True, is_muted=True, stats_mgr=None, tabs_widget=None):
         super().__init__()
@@ -556,6 +812,15 @@ class LiveTab(QWidget):
         self._last_verified = 0
         self._last_dispatched = 0
         self._live_rate = 0.0
+        self._reached_milestones = set()
+
+        # Restore saved volume (0-100)
+        saved_vol = self.settings.get("stream_volumes", {}).get(self.username)
+        if saved_vol is not None:
+            self.volume = int(saved_vol)
+        else:
+            self.volume = 0 if self.is_muted else 100
+        self.pip_window = None
 
         # Stream health tracking
         self._last_video_time = -1.0
@@ -582,7 +847,7 @@ class LiveTab(QWidget):
         """)
         sb_layout = QHBoxLayout(self.stats_bar)
         sb_layout.setContentsMargins(12, 0, 12, 0)
-        sb_layout.setSpacing(16)
+        sb_layout.setSpacing(14)
 
         self.lbl_user = QLabel(f"<b>@{self.username}</b>", self.stats_bar)
         self.lbl_user.setStyleSheet("color: #00f2fe; font-size: 12px;")
@@ -604,6 +869,52 @@ class LiveTab(QWidget):
         sb_layout.addWidget(self.lbl_confirmed)
 
         sb_layout.addStretch()
+
+        # Volume Controls
+        self.btn_vol = QToolButton(self.stats_bar)
+        self.btn_vol.setFixedSize(24, 24)
+        self.btn_vol.setText("🔇" if self.volume == 0 else "🔊")
+        self.btn_vol.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_vol.setStyleSheet("background: transparent; border: none; font-size: 13px;")
+        self.btn_vol.clicked.connect(self._toggle_vol_mute)
+        sb_layout.addWidget(self.btn_vol)
+
+        self.slider_vol = QSlider(Qt.Orientation.Horizontal, self.stats_bar)
+        self.slider_vol.setRange(0, 100)
+        self.slider_vol.setValue(self.volume)
+        self.slider_vol.setFixedWidth(70)
+        self.slider_vol.setStyleSheet("""
+            QSlider::groove:horizontal { border: none; height: 4px; background: #2b2d42; border-radius: 2px; }
+            QSlider::sub-page:horizontal { background: #25F4EE; border-radius: 2px; }
+            QSlider::handle:horizontal { background: #ffffff; border: 1px solid #25F4EE; width: 10px; margin-top: -3px; margin-bottom: -3px; border-radius: 5px; }
+        """)
+        self.slider_vol.valueChanged.connect(self._on_vol_slider_changed)
+        sb_layout.addWidget(self.slider_vol)
+
+        self.lbl_vol = QLabel(f"{self.volume}%", self.stats_bar)
+        self.lbl_vol.setFixedWidth(32)
+        self.lbl_vol.setStyleSheet("color: #8c8ea6; font-size: 10px;")
+        sb_layout.addWidget(self.lbl_vol)
+
+        # PiP Button
+        self.btn_pip = QPushButton("⧉ PiP", self.stats_bar)
+        self.btn_pip.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_pip.setToolTip("Pop out Picture-in-Picture floating mini-player (stays on top)")
+        self.btn_pip.setStyleSheet("""
+            QPushButton {
+                background-color: #232535;
+                color: #25F4EE;
+                border: 1px solid #364057;
+                border-radius: 4px;
+                padding: 2px 8px;
+                font-size: 10px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #364057; }
+        """)
+        self.btn_pip.clicked.connect(self.toggle_pip)
+        sb_layout.addWidget(self.btn_pip)
+
         layout.addWidget(self.stats_bar)
 
         self.webview = UniversalWebView(
@@ -612,9 +923,45 @@ class LiveTab(QWidget):
             user_data_folder=USER_DATA_DIR
         )
         self.webview.set_muted(self.is_muted)
+        self.webview.set_volume(self.volume / 100.0)
         self.webview.source_changed.connect(self._check_url_redirect)
         self.webview.navigation_completed.connect(self._on_nav_completed)
         layout.addWidget(self.webview)
+
+        # Detached placeholder widget
+        self.detached_placeholder = QWidget(self)
+        ph_layout = QVBoxLayout(self.detached_placeholder)
+        ph_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        ph_layout.setSpacing(12)
+
+        ph_icon = QLabel("📺")
+        ph_icon.setStyleSheet("font-size: 48px; background: transparent;")
+        ph_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        ph_layout.addWidget(ph_icon)
+
+        self.ph_text = QLabel("Live stream is active in Picture-in-Picture")
+        self.ph_text.setStyleSheet("color: #8c8ea6; font-size: 14px; font-weight: 500;")
+        self.ph_text.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        ph_layout.addWidget(self.ph_text)
+
+        self.ph_dock_btn = QPushButton("⤓ Dock Stream Back to Tab")
+        self.ph_dock_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.ph_dock_btn.setFixedSize(200, 32)
+        self.ph_dock_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #25F4EE;
+                color: #121212;
+                font-weight: bold;
+                border-radius: 6px;
+                font-size: 11px;
+            }
+            QPushButton:hover { background-color: #1fe0d9; }
+        """)
+        self.ph_dock_btn.clicked.connect(self.close_pip)
+        ph_layout.addWidget(self.ph_dock_btn, alignment=Qt.AlignmentFlag.AlignCenter)
+
+        layout.addWidget(self.detached_placeholder)
+        self.detached_placeholder.hide()
 
         # 1-second live stats polling timer
         self._stats_timer = QTimer(self)
@@ -630,6 +977,79 @@ class LiveTab(QWidget):
         self._recycle_timer = QTimer(self)
         self._recycle_timer.timeout.connect(self._recycle_if_stale)
         self._recycle_timer.start(300000)
+
+    def set_volume(self, vol):
+        self.volume = max(0, min(100, int(vol)))
+        if hasattr(self, 'slider_vol') and self.slider_vol.value() != self.volume:
+            self.slider_vol.blockSignals(True)
+            self.slider_vol.setValue(self.volume)
+            self.slider_vol.blockSignals(False)
+        if hasattr(self, 'lbl_vol'):
+            self.lbl_vol.setText(f"{self.volume}%")
+        if hasattr(self, 'btn_vol'):
+            self.btn_vol.setText("🔇" if self.volume == 0 else "🔊")
+
+        is_muted = (self.volume == 0)
+        self.is_muted = is_muted
+        self.webview.set_volume(self.volume / 100.0)
+
+        self.settings.setdefault("stream_volumes", {})[self.username] = self.volume
+        self.settings.setdefault("muted_users", {})[self.username] = is_muted
+
+    def _on_vol_slider_changed(self, val):
+        self.set_volume(val)
+
+    def _toggle_vol_mute(self):
+        if self.volume > 0:
+            self._last_nonzero_vol = self.volume
+            self.set_volume(0)
+        else:
+            self.set_volume(getattr(self, '_last_nonzero_vol', 80))
+
+    def toggle_pip(self):
+        if self.pip_window:
+            self.close_pip()
+        else:
+            self.open_pip()
+
+    def open_pip(self):
+        if self.pip_window:
+            self.pip_window.show()
+            self.pip_window.raise_()
+            self.pip_window.activateWindow()
+            return
+        self.pip_window = PipWindow(self.username, self, parent=self.window())
+        self.pip_window.dock_back_requested.connect(self.close_pip)
+        wv = self.detach_webview(reason="pip")
+        self.pip_window.attach_webview(wv)
+        self.pip_window.update_likes(self._last_verified)
+        self.btn_pip.setText("⤓ Dock")
+        self.pip_window.show()
+
+    def close_pip(self, username=None):
+        if self.pip_window:
+            pip = self.pip_window
+            self.pip_window = None
+            wv = pip.detach_webview()
+            self.attach_webview(wv or self.webview)
+            self.btn_pip.setText("⧉ PiP")
+            pip.deleteLater()
+
+    def detach_webview(self, reason="pip"):
+        if hasattr(self, 'webview') and self.webview.parent() == self:
+            self.webview.setParent(None)
+            self.ph_text.setText("Live stream is active in Picture-in-Picture" if reason == "pip" else "Live stream is active in Multi-Stream Grid Mode")
+            self.ph_dock_btn.setVisible(reason == "pip")
+            self.detached_placeholder.show()
+            return self.webview
+        return self.webview
+
+    def attach_webview(self, webview=None):
+        if webview:
+            self.webview = webview
+        self.detached_placeholder.hide()
+        self.layout().addWidget(self.webview)
+        self.webview.show()
 
     def _poll_stats(self):
         if not self._stream_end_detected:
@@ -650,8 +1070,21 @@ class LiveTab(QWidget):
         failed = int(res.get('failed', 0) or 0)
         room_likes = int(res.get('roomLikes', 0) or 0)
 
-        # Calculate live rate
+        # Milestone checking
         now = time.time()
+        for m in self.STANDARD_MILESTONES:
+            if verified >= m and m not in self._reached_milestones:
+                self._reached_milestones.add(m)
+                self.milestone_reached.emit(self.username, m, int(now - self._tab_opened_at))
+
+        # Update PiP or Grid card likes
+        if self.pip_window:
+            self.pip_window.update_likes(verified)
+        win = self.window()
+        if hasattr(win, 'grid_cards') and self.username in win.grid_cards:
+            win.grid_cards[self.username].update_likes(verified)
+
+        # Calculate live rate
         dt = max(0.5, now - self._last_stats_tick)
         delta_v = max(0, verified - self._last_verified)
         delta_d = max(0, dispatched - self._last_dispatched)
@@ -662,10 +1095,6 @@ class LiveTab(QWidget):
         else:
             self._live_rate = 0.0
 
-        # Tapper maintenance and background catch-up:
-        # If tab is in background, browsers clamp setTimeout to 1Hz.
-        # We compute expected taps based on like_delay_ms and burst any shortfall
-        # in a single IPC call per second, keeping background tabs at full speed!
         if self.tapper_enabled and self._is_background and dt >= 0.8:
             base = self.settings.get("like_delay_ms", 100)
             rand = self.settings.get("randomization_ms", 50)
@@ -675,7 +1104,6 @@ class LiveTab(QWidget):
             if needed > 0:
                 self.webview.burst_tapper(needed)
         elif self.tapper_enabled and not self._is_background and delta_d == 0 and dt >= 1.5:
-            # Foreground safety watchdog: wake up loop if temporarily paused
             self.webview.wakeup_tapper()
 
         self._last_stats_tick = now
@@ -711,14 +1139,12 @@ class LiveTab(QWidget):
     def _on_nav_completed(self, success, url):
         if success:
             self.webview.set_muted(self.is_muted)
-            # Ensure video playback is unpaused natively
+            self.webview.set_volume(self.volume / 100.0)
             self.webview.evaluate_js("(function() { var v = document.querySelector('video'); if (v && v.paused) v.play().catch(function(){}); })();")
             base = self.settings.get("like_delay_ms", 100)
             rand = self.settings.get("randomization_ms", 50)
-            # Inject and start in-page native auto-tapper loop
             self.webview.inject_in_page_tapper(base, rand, enabled=self.tapper_enabled)
 
-            # Start tracking in StatsManager
             if self.stats_mgr and not self.session_id:
                 self.session_id = self.stats_mgr.start_session(self.username)
 
@@ -734,6 +1160,10 @@ class LiveTab(QWidget):
     def set_muted(self, muted):
         self.is_muted = muted
         self.webview.set_muted(muted)
+        if muted:
+            self.set_volume(0)
+        elif self.volume == 0:
+            self.set_volume(80)
 
     def set_tapper_enabled(self, enabled):
         self.tapper_enabled = enabled
@@ -849,6 +1279,12 @@ class LiveTab(QWidget):
             pass
 
     def cleanup(self):
+        if self.pip_window:
+            try:
+                self.pip_window.close()
+            except Exception:
+                pass
+            self.pip_window = None
         self._health_timer.stop()
         if hasattr(self, '_stats_timer'):
             self._stats_timer.stop()
@@ -1011,6 +1447,22 @@ class AnalyticsDialog(QDialog):
         export_btn.clicked.connect(self._export_csv)
         header_layout.addWidget(export_btn)
 
+        export_json_btn = QPushButton("📥 Export JSON")
+        export_json_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        export_json_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #232535;
+                color: #25F4EE;
+                border: 1px solid #364057;
+                font-weight: bold;
+                padding: 6px 14px;
+                border-radius: 6px;
+            }
+            QPushButton:hover { background-color: #364057; color: #ffffff; }
+        """)
+        export_json_btn.clicked.connect(self._export_json)
+        header_layout.addWidget(export_json_btn)
+
         refresh_btn = QPushButton("🔄 Refresh")
         refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         refresh_btn.setStyleSheet("""
@@ -1171,6 +1623,19 @@ class AnalyticsDialog(QDialog):
                 QMessageBox.information(self, "Export Successful", f"Analytics data successfully exported to:\n{path}")
             except Exception as e:
                 QMessageBox.critical(self, "Export Error", f"Failed to export CSV: {e}")
+
+    def _export_json(self):
+        if not self.stats_mgr:
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Export Session Analytics JSON", "stream_analytics.json", "JSON Files (*.json)")
+        if path:
+            try:
+                json_data = self.stats_mgr.export_json()
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(json_data)
+                QMessageBox.information(self, "Export Successful", f"Analytics data successfully exported to:\n{path}")
+            except Exception as e:
+                QMessageBox.critical(self, "Export Error", f"Failed to export JSON: {e}")
 
 
 class SyncSettingsDialog(QDialog):
@@ -1475,6 +1940,644 @@ class SyncSettingsDialog(QDialog):
         self.accept()
 
 
+class CreatorProfileDialog(QDialog):
+    """Lifetime statistics card and profile for a creator."""
+    open_stream_requested = pyqtSignal(str)
+    toggle_tapper_requested = pyqtSignal(str)
+
+    def __init__(self, username, stats_mgr, avatar_pixmap=None, is_live=False, is_tapper_enabled=True, parent=None):
+        super().__init__(parent)
+        self.username = username
+        self.stats_mgr = stats_mgr
+        self.is_live = is_live
+        self.is_tapper_enabled = is_tapper_enabled
+        self.setWindowTitle(f"@{self.username} — Creator Profile")
+        self.setFixedSize(620, 520)
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #13141d;
+                color: #e0e0e0;
+            }
+            QLabel {
+                color: #e0e0e0;
+            }
+            QTableWidget {
+                background-color: #181926;
+                border: 1px solid #232537;
+                border-radius: 6px;
+                color: #e0e0e0;
+                gridline-color: #232537;
+                selection-background-color: #2b2d42;
+            }
+            QHeaderView::section {
+                background-color: #1c1e2e;
+                color: #8c8ea6;
+                padding: 6px;
+                border: 1px solid #232537;
+                font-weight: bold;
+                font-size: 11px;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(14)
+
+        # Profile Header Banner
+        header = QHBoxLayout()
+        header.setSpacing(16)
+
+        # 64x64 Avatar
+        self.avatar_lbl = QLabel(self)
+        self.avatar_lbl.setFixedSize(64, 64)
+        if isinstance(avatar_pixmap, QPixmap) and not avatar_pixmap.isNull():
+            target = QPixmap(64, 64)
+            target.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(target)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            path = QPainterPath()
+            path.addEllipse(0, 0, 64, 64)
+            painter.setClipPath(path)
+            scaled = avatar_pixmap.scaled(64, 64, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
+            x = (64 - scaled.width()) // 2
+            y = (64 - scaled.height()) // 2
+            painter.drawPixmap(x, y, scaled)
+            painter.end()
+            self.avatar_lbl.setPixmap(target)
+        else:
+            self.avatar_lbl.setText("👤")
+            self.avatar_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        border_color = "#FE2C55" if is_live else "#333333"
+        self.avatar_lbl.setStyleSheet(f"background-color: #282a3d; border: 2px solid {border_color}; border-radius: 32px;")
+        header.addWidget(self.avatar_lbl)
+
+        # User meta
+        meta_layout = QVBoxLayout()
+        meta_layout.setSpacing(4)
+        name_row = QHBoxLayout()
+        name_row.setSpacing(8)
+        lbl_handle = QLabel(f"@{self.username}")
+        lbl_handle.setStyleSheet("font-size: 20px; font-weight: 800; color: #ffffff;")
+        name_row.addWidget(lbl_handle)
+
+        live_badge = QLabel("🔴 LIVE NOW" if is_live else "⚪ Offline")
+        badge_style = "background-color: rgba(254, 44, 85, 0.2); color: #FE2C55; font-weight: bold; padding: 2px 8px; border-radius: 4px; font-size: 10px;" if is_live else "background-color: rgba(255, 255, 255, 0.08); color: #888; font-weight: 500; padding: 2px 8px; border-radius: 4px; font-size: 10px;"
+        live_badge.setStyleSheet(badge_style)
+        name_row.addWidget(live_badge)
+        name_row.addStretch()
+        meta_layout.addLayout(name_row)
+
+        profile = self.stats_mgr.get_streamer_profile(self.username) if self.stats_mgr else {}
+        first_act = profile.get("first_active", 0)
+        first_str = datetime.fromtimestamp(first_act, tz=timezone.utc).strftime("%b %d, %Y") if first_act else "Recently added"
+        lbl_sub = QLabel(f"First tracked: <b>{first_str}</b> • Total Sessions: <b>{profile.get('sessions_count', 0)}</b>")
+        lbl_sub.setStyleSheet("color: #8c8ea6; font-size: 11px;")
+        meta_layout.addWidget(lbl_sub)
+
+        header.addLayout(meta_layout)
+        header.addStretch()
+        layout.addLayout(header)
+
+        # 4 KPI Cards
+        kpi_row = QHBoxLayout()
+        kpi_row.setSpacing(10)
+
+        verified = profile.get("verified_likes", 0)
+        taps = profile.get("taps_dispatched", 0)
+        dur = profile.get("total_duration_seconds", 0)
+        dh, dm = divmod(dur // 60, 60)
+        dur_str = f"{dh}h {dm}m" if dh > 0 else f"{dm}m"
+        rate = profile.get("delivery_rate", 100.0)
+
+        kpi_row.addWidget(self._make_card("❤️ Lifetime Likes", f"{verified:,}", "#FE2C55"))
+        kpi_row.addWidget(self._make_card("👆 Total Taps", f"{taps:,}", "#00F2FE"))
+        kpi_row.addWidget(self._make_card("⏱️ Watch Time", dur_str, "#FFCC00"))
+        kpi_row.addWidget(self._make_card("📶 Delivery Rate", f"{rate}%", "#2ED573"))
+        layout.addLayout(kpi_row)
+
+        # Sessions Table
+        lbl_history = QLabel("Recent Streaming Sessions")
+        lbl_history.setStyleSheet("font-size: 12px; font-weight: bold; color: #ffffff; margin-top: 4px;")
+        layout.addWidget(lbl_history)
+
+        self.table = QTableWidget()
+        self.table.setColumnCount(5)
+        self.table.setHorizontalHeaderLabels(["Date & Time", "Duration", "Verified Likes", "Taps Dispatched", "Status"])
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self.table.verticalHeader().setVisible(False)
+
+        sessions = profile.get("sessions", [])
+        self.table.setRowCount(len(sessions))
+        for row, s in enumerate(sessions):
+            st = s.get("started_at", 0)
+            date_str = datetime.fromtimestamp(st, tz=timezone.utc).strftime("%Y-%m-%d %H:%M") if st else "-"
+            sdur = s.get("duration_seconds", 0)
+            sm, ss = divmod(sdur, 60)
+            sh, sm = divmod(sm, 60)
+            s_dur_str = f"{sh}h {sm}m" if sh > 0 else f"{sm}m {ss}s"
+
+            self.table.setItem(row, 0, QTableWidgetItem(date_str))
+            self.table.setItem(row, 1, QTableWidgetItem(s_dur_str))
+            self.table.setItem(row, 2, QTableWidgetItem(f"❤️ {s.get('verified_likes', 0):,}"))
+            self.table.setItem(row, 3, QTableWidgetItem(f"{s.get('taps_dispatched', 0):,}"))
+            stat = "🟢 Active" if s.get("status") == "active" else str(s.get("status", "completed")).capitalize()
+            self.table.setItem(row, 4, QTableWidgetItem(stat))
+
+        layout.addWidget(self.table)
+
+        # Action Buttons
+        btn_bar = QHBoxLayout()
+        btn_bar.setSpacing(10)
+
+        open_btn = QPushButton("📺 Open Stream Tab")
+        open_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        open_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #FE2C55;
+                color: white;
+                font-weight: bold;
+                padding: 7px 16px;
+                border-radius: 6px;
+            }
+            QPushButton:hover { background-color: #E0284D; }
+        """)
+        open_btn.clicked.connect(self._on_open_stream)
+        btn_bar.addWidget(open_btn)
+
+        tapper_text = "❤️ Turn Off Auto-Tapper" if self.is_tapper_enabled else "🤍 Turn On Auto-Tapper"
+        self.btn_tapper = QPushButton(tapper_text)
+        self.btn_tapper.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_tapper.setStyleSheet("""
+            QPushButton {
+                background-color: #232535;
+                color: #e0e0e0;
+                padding: 7px 16px;
+                border-radius: 6px;
+                font-weight: 500;
+            }
+            QPushButton:hover { background-color: #2e3045; }
+        """)
+        self.btn_tapper.clicked.connect(self._on_toggle_tapper)
+        btn_bar.addWidget(self.btn_tapper)
+
+        btn_bar.addStretch()
+
+        close_btn = QPushButton("Close")
+        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        close_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #232535;
+                color: #ffffff;
+                padding: 7px 18px;
+                border-radius: 6px;
+                font-weight: 500;
+            }
+            QPushButton:hover { background-color: #2e3045; }
+        """)
+        close_btn.clicked.connect(self.accept)
+        btn_bar.addWidget(close_btn)
+
+        layout.addLayout(btn_bar)
+
+    def _make_card(self, title, value, color):
+        frame = QFrame()
+        frame.setStyleSheet("""
+            QFrame {
+                background-color: #181926;
+                border: 1px solid #232537;
+                border-radius: 8px;
+            }
+        """)
+        l = QVBoxLayout(frame)
+        l.setContentsMargins(10, 8, 10, 8)
+        l.setSpacing(2)
+        t = QLabel(title)
+        t.setStyleSheet("font-size: 10.5px; color: #8c8ea6; font-weight: 500;")
+        v = QLabel(value)
+        v.setStyleSheet(f"font-size: 16px; font-weight: bold; color: {color};")
+        l.addWidget(t)
+        l.addWidget(v)
+        return frame
+
+    def _on_open_stream(self):
+        self.open_stream_requested.emit(self.username)
+        self.accept()
+
+    def _on_toggle_tapper(self):
+        self.toggle_tapper_requested.emit(self.username)
+        self.is_tapper_enabled = not self.is_tapper_enabled
+        self.btn_tapper.setText("❤️ Turn Off Auto-Tapper" if self.is_tapper_enabled else "🤍 Turn On Auto-Tapper")
+
+
+class WebhookNotifier(QObject):
+    """Asynchronous notification and webhook dispatcher for Discord, Telegram, and Desktop OS."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._sent_milestones = set()
+        self._recently_notified_live = {}
+
+    def notify_streamer_live(self, username, avatar_url="", settings=None):
+        notif_cfg = (settings or {}).get("notifications", {})
+        if not notif_cfg.get("notify_live", True):
+            return
+
+        now = time.time()
+        if now - self._recently_notified_live.get(username, 0) < 900:
+            return
+        self._recently_notified_live[username] = now
+
+        # Discord
+        if notif_cfg.get("discord_enabled", False) and notif_cfg.get("discord_url"):
+            self._send_discord_async(
+                notif_cfg["discord_url"],
+                title=f"🔴 Streamer is LIVE: @{username}",
+                description=f"**@{username}** has started streaming live on TikTok!\nAuto Liker is ready to boost.",
+                url=f"https://www.tiktok.com/@{username}/live",
+                color=16657493,
+                avatar_url=avatar_url
+            )
+
+        # Telegram
+        if notif_cfg.get("telegram_enabled", False) and notif_cfg.get("telegram_token") and notif_cfg.get("telegram_chat_id"):
+            text = f"🔴 *LIVE ALERT*\n\n*@{username}* is now LIVE on TikTok!\n👉 [Watch Stream](https://www.tiktok.com/@{username}/live)"
+            self._send_telegram_async(notif_cfg["telegram_token"], notif_cfg["telegram_chat_id"], text)
+
+    def notify_milestone(self, username, verified_likes, duration_seconds=0, settings=None):
+        notif_cfg = (settings or {}).get("notifications", {})
+        if not notif_cfg.get("notify_milestones", True):
+            return
+
+        key = (username, verified_likes)
+        if key in self._sent_milestones:
+            return
+        self._sent_milestones.add(key)
+
+        m, s = divmod(duration_seconds, 60)
+        h, m = divmod(m, 60)
+        dur_str = f"{h}h {m}m" if h > 0 else f"{m}m {s}s"
+
+        # Discord
+        if notif_cfg.get("discord_enabled", False) and notif_cfg.get("discord_url"):
+            fields = [
+                {"name": "❤️ Verified Likes", "value": f"**{verified_likes:,}**", "inline": True},
+                {"name": "⏱️ Duration", "value": dur_str, "inline": True},
+                {"name": "🔗 Stream Link", "value": f"[tiktok.com/@{username}/live](https://www.tiktok.com/@{username}/live)", "inline": False}
+            ]
+            self._send_discord_async(
+                notif_cfg["discord_url"],
+                title=f"🎉 Milestone Reached: @{username}",
+                description=f"Congratulations! **@{username}** has just crossed **{verified_likes:,} verified likes**!",
+                url=f"https://www.tiktok.com/@{username}/live",
+                color=2487534,
+                fields=fields
+            )
+
+        # Telegram
+        if notif_cfg.get("telegram_enabled", False) and notif_cfg.get("telegram_token") and notif_cfg.get("telegram_chat_id"):
+            text = (
+                f"🎉 *MILESTONE REACHED!*\n\n"
+                f"Streamer: *@{username}*\n"
+                f"❤️ Verified Likes: *{verified_likes:,}*\n"
+                f"⏱️ Session Duration: {dur_str}\n"
+                f"👉 [Watch Stream](https://www.tiktok.com/@{username}/live)"
+            )
+            self._send_telegram_async(notif_cfg["telegram_token"], notif_cfg["telegram_chat_id"], text)
+
+    def _send_discord_async(self, webhook_url, title, description, url="", color=16657493, avatar_url="", fields=None):
+        def worker():
+            try:
+                payload = {
+                    "username": "TikTok Live Auto Liker",
+                    "embeds": [{
+                        "title": title,
+                        "description": description,
+                        "url": url,
+                        "color": color,
+                        "fields": fields or [],
+                        "footer": {"text": f"TikTok Live Auto Liker • {APP_VERSION}"},
+                        "timestamp": datetime.now(timezone.utc).isoformat()
+                    }]
+                }
+                if avatar_url:
+                    payload["embeds"][0]["thumbnail"] = {"url": avatar_url}
+                data = json.dumps(payload).encode("utf-8")
+                req = urllib.request.Request(webhook_url, data=data, headers={
+                    "Content-Type": "application/json",
+                    "User-Agent": "TikTokLiveAutoLiker/1.0"
+                })
+                urllib.request.urlopen(req, timeout=8)
+            except Exception as e:
+                print(f"[WebhookNotifier] Discord error: {e}")
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _send_telegram_async(self, bot_token, chat_id, text):
+        def worker():
+            try:
+                api_url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+                payload = {
+                    "chat_id": chat_id,
+                    "text": text,
+                    "parse_mode": "Markdown",
+                    "disable_web_page_preview": False
+                }
+                data = json.dumps(payload).encode("utf-8")
+                req = urllib.request.Request(api_url, data=data, headers={
+                    "Content-Type": "application/json",
+                    "User-Agent": "TikTokLiveAutoLiker/1.0"
+                })
+                urllib.request.urlopen(req, timeout=8)
+            except Exception as e:
+                print(f"[WebhookNotifier] Telegram error: {e}")
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def test_discord(self, webhook_url, callback=None):
+        def worker():
+            try:
+                payload = {
+                    "username": "TikTok Live Auto Liker",
+                    "content": f"✅ **Discord Webhook Connection Successful!**\nTikTok Live Auto Liker {APP_VERSION} is configured and ready."
+                }
+                data = json.dumps(payload).encode("utf-8")
+                req = urllib.request.Request(webhook_url, data=data, headers={
+                    "Content-Type": "application/json",
+                    "User-Agent": "TikTokLiveAutoLiker/1.0"
+                })
+                with urllib.request.urlopen(req, timeout=8) as resp:
+                    ok = (200 <= resp.status < 300)
+                    if callback: callback(ok, "Success" if ok else f"HTTP {resp.status}")
+            except Exception as e:
+                if callback: callback(False, str(e))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def test_telegram(self, bot_token, chat_id, callback=None):
+        def worker():
+            try:
+                api_url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+                payload = {
+                    "chat_id": chat_id,
+                    "text": f"✅ *Telegram Alert Connection Successful!*\nTikTok Live Auto Liker {APP_VERSION} is connected.",
+                    "parse_mode": "Markdown"
+                }
+                data = json.dumps(payload).encode("utf-8")
+                req = urllib.request.Request(api_url, data=data, headers={
+                    "Content-Type": "application/json",
+                    "User-Agent": "TikTokLiveAutoLiker/1.0"
+                })
+                with urllib.request.urlopen(req, timeout=8) as resp:
+                    ok = (200 <= resp.status < 300)
+                    if callback: callback(ok, "Success" if ok else f"HTTP {resp.status}")
+            except Exception as e:
+                if callback: callback(False, str(e))
+        threading.Thread(target=worker, daemon=True).start()
+
+
+class NotificationSettingsDialog(QDialog):
+    """Configuration dialog for Desktop Toasts, Discord Webhooks, and Telegram Alerts."""
+    def __init__(self, settings, webhook_notifier=None, test_desktop_fn=None, parent=None):
+        super().__init__(parent)
+        self.settings = settings
+        self.webhook_notifier = webhook_notifier
+        self.test_desktop_fn = test_desktop_fn
+        self.setWindowTitle("🔔 Notifications & Webhook Alerts")
+        self.setFixedSize(540, 580)
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #151622;
+                color: #e0e0e0;
+            }
+            QGroupBox {
+                border: 1px solid #282a3d;
+                border-radius: 8px;
+                margin-top: 12px;
+                padding-top: 14px;
+                font-weight: bold;
+                color: #ffffff;
+                font-size: 11.5px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 12px;
+                padding: 0 4px;
+                color: #25F4EE;
+            }
+            QCheckBox {
+                color: #e0e0e0;
+                font-size: 11px;
+                spacing: 8px;
+            }
+            QLineEdit {
+                background-color: #1e202f;
+                border: 1px solid #32354a;
+                border-radius: 6px;
+                padding: 6px 10px;
+                color: #ffffff;
+                font-size: 11px;
+            }
+            QLineEdit:focus {
+                border: 1px solid #25F4EE;
+            }
+            QPushButton {
+                background-color: #232535;
+                color: #e0e0e0;
+                border: 1px solid #364057;
+                border-radius: 6px;
+                padding: 5px 12px;
+                font-size: 11px;
+                font-weight: 500;
+            }
+            QPushButton:hover {
+                background-color: #2e3045;
+                color: #ffffff;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(12)
+
+        # Header
+        title = QLabel("🔔 Notifications & Webhook Alerts")
+        title.setStyleSheet("font-size: 16px; font-weight: bold; color: #ffffff;")
+        layout.addWidget(title)
+
+        notif = self.settings.get("notifications", {})
+
+        # Group 1: Desktop OS Notifications
+        grp_desktop = QGroupBox("🖥️ Desktop OS Notifications")
+        lay_desktop = QVBoxLayout(grp_desktop)
+        lay_desktop.setSpacing(8)
+
+        self.chk_toasts = QCheckBox("Enable Native OS Notifications (macOS / Windows / Linux)")
+        self.chk_toasts.setChecked(notif.get("desktop_toasts", True))
+        lay_desktop.addWidget(self.chk_toasts)
+
+        self.chk_live = QCheckBox("Notify when a favorited streamer goes LIVE")
+        self.chk_live.setChecked(notif.get("notify_live", True))
+        lay_desktop.addWidget(self.chk_live)
+
+        self.chk_milestones = QCheckBox("Notify on Like Milestones (10k, 25k, 50k, 100k, 250k, 500k, 1M)")
+        self.chk_milestones.setChecked(notif.get("notify_milestones", True))
+        lay_desktop.addWidget(self.chk_milestones)
+
+        test_os_btn = QPushButton("Test Desktop Notification")
+        test_os_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        test_os_btn.clicked.connect(self._test_os_notification)
+        lay_desktop.addWidget(test_os_btn, alignment=Qt.AlignmentFlag.AlignLeft)
+
+        layout.addWidget(grp_desktop)
+
+        # Group 2: Discord Webhook
+        grp_discord = QGroupBox("🎮 Discord Webhook Integration")
+        lay_discord = QVBoxLayout(grp_discord)
+        lay_discord.setSpacing(8)
+
+        self.chk_discord = QCheckBox("Enable Discord Channel Alerts")
+        self.chk_discord.setChecked(notif.get("discord_enabled", False))
+        lay_discord.addWidget(self.chk_discord)
+
+        self.input_discord = QLineEdit()
+        self.input_discord.setPlaceholderText("https://discord.com/api/webhooks/...")
+        self.input_discord.setText(notif.get("discord_url", ""))
+        lay_discord.addWidget(self.input_discord)
+
+        disc_row = QHBoxLayout()
+        self.btn_test_discord = QPushButton("Test Discord Webhook")
+        self.btn_test_discord.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_test_discord.clicked.connect(self._test_discord)
+        disc_row.addWidget(self.btn_test_discord)
+        self.lbl_disc_status = QLabel("")
+        self.lbl_disc_status.setStyleSheet("font-size: 10.5px;")
+        disc_row.addWidget(self.lbl_disc_status)
+        disc_row.addStretch()
+        lay_discord.addLayout(disc_row)
+
+        layout.addWidget(grp_discord)
+
+        # Group 3: Telegram Bot
+        grp_telegram = QGroupBox("✈️ Telegram Bot Alerts")
+        lay_telegram = QVBoxLayout(grp_telegram)
+        lay_telegram.setSpacing(8)
+
+        self.chk_telegram = QCheckBox("Enable Telegram Bot Alerts")
+        self.chk_telegram.setChecked(notif.get("telegram_enabled", False))
+        lay_telegram.addWidget(self.chk_telegram)
+
+        self.input_tg_token = QLineEdit()
+        self.input_tg_token.setPlaceholderText("Bot Token (e.g. 123456789:ABCdef...)")
+        self.input_tg_token.setText(notif.get("telegram_token", ""))
+        lay_telegram.addWidget(self.input_tg_token)
+
+        self.input_tg_chat = QLineEdit()
+        self.input_tg_chat.setPlaceholderText("Chat ID / Channel ID (e.g. -1001234567890)")
+        self.input_tg_chat.setText(notif.get("telegram_chat_id", ""))
+        lay_telegram.addWidget(self.input_tg_chat)
+
+        tg_row = QHBoxLayout()
+        self.btn_test_telegram = QPushButton("Test Telegram Alert")
+        self.btn_test_telegram.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_test_telegram.clicked.connect(self._test_telegram)
+        tg_row.addWidget(self.btn_test_telegram)
+        self.lbl_tg_status = QLabel("")
+        self.lbl_tg_status.setStyleSheet("font-size: 10.5px;")
+        tg_row.addWidget(self.lbl_tg_status)
+        tg_row.addStretch()
+        lay_telegram.addLayout(tg_row)
+
+        layout.addWidget(grp_telegram)
+
+        # Bottom buttons
+        btn_box = QHBoxLayout()
+        btn_box.addStretch()
+
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        cancel_btn.clicked.connect(self.reject)
+        btn_box.addWidget(cancel_btn)
+
+        save_btn = QPushButton("💾 Save Notification Settings")
+        save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        save_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #25F4EE;
+                color: #121212;
+                font-weight: bold;
+                padding: 6px 16px;
+                border: none;
+                border-radius: 6px;
+            }
+            QPushButton:hover { background-color: #1ed1cb; }
+        """)
+        save_btn.clicked.connect(self._save)
+        btn_box.addWidget(save_btn)
+
+        layout.addLayout(btn_box)
+
+    def _test_os_notification(self):
+        if self.test_desktop_fn:
+            self.test_desktop_fn("🔔 Test Notification", "Desktop OS notifications are working properly!")
+
+    def _test_discord(self):
+        url = self.input_discord.text().strip()
+        if not url:
+            self.lbl_disc_status.setText("❌ Please enter a webhook URL")
+            self.lbl_disc_status.setStyleSheet("color: #ff5a5a; font-size: 10.5px;")
+            return
+        self.lbl_disc_status.setText("⏳ Sending test...")
+        self.lbl_disc_status.setStyleSheet("color: #ffcc00; font-size: 10.5px;")
+        if self.webhook_notifier:
+            self.webhook_notifier.test_discord(url, self._on_discord_test_result)
+
+    def _on_discord_test_result(self, ok, msg):
+        QTimer.singleShot(0, lambda: self._update_discord_status(ok, msg))
+
+    def _update_discord_status(self, ok, msg):
+        if ok:
+            self.lbl_disc_status.setText("✅ Discord Connected!")
+            self.lbl_disc_status.setStyleSheet("color: #2ed573; font-size: 10.5px;")
+        else:
+            self.lbl_disc_status.setText(f"❌ Failed: {msg[:30]}")
+            self.lbl_disc_status.setStyleSheet("color: #ff5a5a; font-size: 10.5px;")
+
+    def _test_telegram(self):
+        token = self.input_tg_token.text().strip()
+        chat_id = self.input_tg_chat.text().strip()
+        if not token or not chat_id:
+            self.lbl_tg_status.setText("❌ Please enter token and chat ID")
+            self.lbl_tg_status.setStyleSheet("color: #ff5a5a; font-size: 10.5px;")
+            return
+        self.lbl_tg_status.setText("⏳ Sending test...")
+        self.lbl_tg_status.setStyleSheet("color: #ffcc00; font-size: 10.5px;")
+        if self.webhook_notifier:
+            self.webhook_notifier.test_telegram(token, chat_id, self._on_telegram_test_result)
+
+    def _on_telegram_test_result(self, ok, msg):
+        QTimer.singleShot(0, lambda: self._update_telegram_status(ok, msg))
+
+    def _update_telegram_status(self, ok, msg):
+        if ok:
+            self.lbl_tg_status.setText("✅ Telegram Connected!")
+            self.lbl_tg_status.setStyleSheet("color: #2ed573; font-size: 10.5px;")
+        else:
+            self.lbl_tg_status.setText(f"❌ Failed: {msg[:30]}")
+            self.lbl_tg_status.setStyleSheet("color: #ff5a5a; font-size: 10.5px;")
+
+    def _save(self):
+        notif = self.settings.setdefault("notifications", {})
+        notif["desktop_toasts"] = self.chk_toasts.isChecked()
+        notif["notify_live"] = self.chk_live.isChecked()
+        notif["notify_milestones"] = self.chk_milestones.isChecked()
+        notif["discord_enabled"] = self.chk_discord.isChecked()
+        notif["discord_url"] = self.input_discord.text().strip()
+        notif["telegram_enabled"] = self.chk_telegram.isChecked()
+        notif["telegram_token"] = self.input_tg_token.text().strip()
+        notif["telegram_chat_id"] = self.input_tg_chat.text().strip()
+        self.accept()
+
+
 class TikTokAutoLikerApp(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -1509,6 +2612,10 @@ class TikTokAutoLikerApp(QMainWindow):
         self.sync_mgr.cookies_updated.connect(self._on_cookies_received)
         self._sync_dialog = None
         self.stats_mgr = StatsManager(data_dir=DATA_DIR)
+        self.view_mode = "tabs"
+        self.grid_cards = {}
+        self.webhook_notifier = WebhookNotifier(self)
+        self._init_system_tray()
 
         # Restore saved cookies if present
         saved_cookies, _ = self.sync_mgr._read_cookies()
@@ -1543,6 +2650,7 @@ class TikTokAutoLikerApp(QMainWindow):
         widget.toggle_btn.clicked.connect(lambda _, un=username: QTimer.singleShot(0, lambda: self.toggle_tapper(un)))
         widget.mute_btn.clicked.connect(lambda _, un=username: QTimer.singleShot(0, lambda: self.toggle_mute(un)))
         widget.del_btn.clicked.connect(lambda _, un=username: QTimer.singleShot(0, lambda: self.remove_favorite(un)))
+        widget.avatar_clicked.connect(self.open_creator_profile)
 
         if username in self.avatar_pixmap_cache:
             widget.set_avatar(self.avatar_pixmap_cache[username])
@@ -1571,6 +2679,7 @@ class TikTokAutoLikerApp(QMainWindow):
             is_muted = self.settings.setdefault("muted_users", {}).get(username, True)
             tab = LiveTab(username, self.settings, tapper_enabled, is_muted, stats_mgr=self.stats_mgr, tabs_widget=self.tabs)
             tab.stream_ended.connect(self._on_stream_ended_in_tab)
+            tab.milestone_reached.connect(self._on_milestone_reached)
 
             prefix = "❤️ " if tapper_enabled else ""
             idx = self.tabs.addTab(tab, f"{prefix}LIVE: @{username}")
@@ -1579,6 +2688,8 @@ class TikTokAutoLikerApp(QMainWindow):
             self.active_streams[username] = tab
             self._update_waiting_tab()
             self._update_active_tab_indicators()
+            if getattr(self, 'view_mode', 'tabs') == 'grid':
+                self._refresh_grid_layout()
         else:
             tab = self.active_streams[username]
             idx = self.tabs.indexOf(tab)
@@ -1617,10 +2728,13 @@ class TikTokAutoLikerApp(QMainWindow):
                 is_muted = self.settings.setdefault("muted_users", {}).get(username, True)
                 tab = LiveTab(username, self.settings, tapper_enabled=True, is_muted=is_muted, stats_mgr=self.stats_mgr, tabs_widget=self.tabs)
                 tab.stream_ended.connect(self._on_stream_ended_in_tab)
+                tab.milestone_reached.connect(self._on_milestone_reached)
                 idx = self.tabs.addTab(tab, f"❤️ LIVE: @{username}")
                 self.tabs.setCurrentIndex(idx)
                 self.active_streams[username] = tab
                 self._update_waiting_tab()
+                if getattr(self, 'view_mode', 'tabs') == 'grid':
+                    self._refresh_grid_layout()
 
             if getattr(self, '_pending_checks', 0) == 0:
                 self._update_status_label()
@@ -1770,6 +2884,9 @@ class TikTokAutoLikerApp(QMainWindow):
 
     def closeEvent(self, event):
         try:
+            if getattr(self, 'tray_icon', None):
+                self.tray_icon.hide()
+
             if hasattr(self, 'check_timer') and self.check_timer.isActive():
                 self.check_timer.stop()
 
@@ -2022,10 +3139,16 @@ class TikTokAutoLikerApp(QMainWindow):
         self.analytics_btn.setStyleSheet(btn_style)
         self.analytics_btn.clicked.connect(self.open_analytics_dialog)
 
+        self.notif_btn = QPushButton("🔔 Alerts & Webhooks")
+        self.notif_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.notif_btn.setStyleSheet(btn_style)
+        self.notif_btn.clicked.connect(self.open_notification_settings)
+
         data_layout.addWidget(self.backup_btn, 0, 0)
         data_layout.addWidget(self.restore_btn, 0, 1)
         data_layout.addWidget(self.cloud_sync_btn, 1, 0)
         data_layout.addWidget(self.analytics_btn, 1, 1)
+        data_layout.addWidget(self.notif_btn, 2, 0, 1, 2)
         left_layout.addWidget(data_container)
 
         # Update Banner
@@ -2179,12 +3302,47 @@ class TikTokAutoLikerApp(QMainWindow):
         """)
         debug_btn.clicked.connect(self.open_debug_console)
 
+        self.btn_toggle_view = QPushButton("⊞ Grid View")
+        self.btn_toggle_view.setToolTip("Toggle between Tabbed View and Multi-Stream Grid View")
+        self.btn_toggle_view.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_toggle_view.setStyleSheet("""
+            QPushButton {
+                background-color: #232535;
+                color: #25F4EE;
+                border: 1px solid #364057;
+                border-radius: 6px;
+                padding: 5px 10px;
+                font-weight: bold;
+                font-size: 8.5pt;
+                margin: 4px 2px;
+            }
+            QPushButton:hover {
+                background-color: #2e3045;
+                color: #ffffff;
+            }
+        """)
+        self.btn_toggle_view.clicked.connect(self._toggle_view_mode)
+
+        corner_layout.addWidget(self.btn_toggle_view)
         corner_layout.addWidget(debug_btn)
         corner_layout.addWidget(refresh_btn)
         corner_layout.addWidget(self.signout_btn)
         self.tabs.setCornerWidget(corner_widget, Qt.Corner.TopRightCorner)
 
-        splitter.addWidget(self.tabs)
+        self.view_stack = QStackedWidget()
+        self.view_stack.addWidget(self.tabs)
+
+        self.grid_scroll = QScrollArea()
+        self.grid_scroll.setWidgetResizable(True)
+        self.grid_scroll.setStyleSheet("QScrollArea { border: none; background-color: #121212; }")
+        self.grid_container = QWidget()
+        self.grid_layout = QGridLayout(self.grid_container)
+        self.grid_layout.setContentsMargins(8, 8, 8, 8)
+        self.grid_layout.setSpacing(8)
+        self.grid_scroll.setWidget(self.grid_container)
+        self.view_stack.addWidget(self.grid_scroll)
+
+        splitter.addWidget(self.view_stack)
         splitter.setSizes([350, 850])
 
     def _setup_webview_engine(self):
@@ -2810,6 +3968,7 @@ class TikTokAutoLikerApp(QMainWindow):
             self.consecutive_offline = {}
 
         if is_live:
+            was_already_live = (username in getattr(self, 'known_live', set()) or username in self.active_streams)
             self.consecutive_offline[username] = 0
             self.known_live.add(username)
             if username in self.fav_widgets:
@@ -2819,11 +3978,18 @@ class TikTokAutoLikerApp(QMainWindow):
                     self._download_avatar(username, avatar_url)
 
             self._sort_list()
+
+            if not was_already_live:
+                self._notify_desktop("🔴 Streamer is LIVE!", f"@{username} is now streaming live on TikTok!")
+                if hasattr(self, 'webhook_notifier'):
+                    self.webhook_notifier.notify_streamer_live(username, avatar_url, self.settings)
+
             tapper_enabled = self.favorites.get(username, True)
             if username not in self.active_streams and tapper_enabled:
                 is_muted = self.settings.setdefault("muted_users", {}).get(username, True)
                 tab = LiveTab(username, self.settings, tapper_enabled, is_muted, stats_mgr=self.stats_mgr, tabs_widget=self.tabs)
                 tab.stream_ended.connect(self._on_stream_ended_in_tab)
+                tab.milestone_reached.connect(self._on_milestone_reached)
 
                 prefix = "❤️ " if tapper_enabled else ""
                 idx = self.tabs.addTab(tab, f"{prefix}LIVE: @{username}")
@@ -2832,6 +3998,8 @@ class TikTokAutoLikerApp(QMainWindow):
                 self.active_streams[username] = tab
                 self._update_waiting_tab()
                 self._update_active_tab_indicators()
+                if getattr(self, 'view_mode', 'tabs') == 'grid':
+                    self._refresh_grid_layout()
         else:
             if avatar_url and username in self.fav_widgets:
                 if not self.fav_widgets[username].has_avatar and getattr(self.fav_widgets[username], 'current_avatar_url', None) != avatar_url:
@@ -2858,6 +4026,8 @@ class TikTokAutoLikerApp(QMainWindow):
                         self._update_waiting_tab()
                         self._fallback_tab_selection()
                         self._update_active_tab_indicators()
+                        if getattr(self, 'view_mode', 'tabs') == 'grid':
+                            self._refresh_grid_layout()
             else:
                 # If creator was not live, immediately update UI from "Checking..." to "Offline"
                 if username in self.fav_widgets:
@@ -2892,6 +4062,9 @@ class TikTokAutoLikerApp(QMainWindow):
         finally:
             self.tabs.blockSignals(False)
             self._on_tab_changed(self.tabs.currentIndex())
+
+        if getattr(self, 'view_mode', 'tabs') == 'grid':
+            self._refresh_grid_layout()
 
     def _fallback_tab_selection(self):
         current = self.tabs.currentWidget()
@@ -2971,6 +4144,176 @@ class TikTokAutoLikerApp(QMainWindow):
         finally:
             self.tabs.blockSignals(False)
             self._on_tab_changed(self.tabs.currentIndex())
+
+        if getattr(self, 'view_mode', 'tabs') == 'grid':
+            self._refresh_grid_layout()
+
+    def _init_system_tray(self):
+        self.tray_icon = None
+        if QSystemTrayIcon.isSystemTrayAvailable():
+            base_dir = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+            icon_path = os.path.join(base_dir, "icon.png")
+            icon = QIcon(icon_path) if os.path.exists(icon_path) else self.windowIcon()
+            self.tray_icon = QSystemTrayIcon(icon, self)
+            self.tray_icon.setToolTip(f"TikTok Live Auto Liker {APP_VERSION}")
+            self.tray_icon.show()
+
+    def _notify_desktop(self, title: str, message: str):
+        notif_cfg = self.settings.setdefault("notifications", {})
+        if not notif_cfg.get("desktop_notifications_enabled", True):
+            return
+        if getattr(self, 'tray_icon', None) and self.tray_icon.isSystemTrayAvailable():
+            self.tray_icon.showMessage(title, message, QSystemTrayIcon.MessageIcon.Information, 4500)
+
+    def _on_milestone_reached(self, username: str, count: int, duration_sec: int = 0):
+        self._notify_desktop("🎉 Like Milestone Reached!", f"@{username} reached {count:,} likes tapped!")
+        if hasattr(self, 'webhook_notifier'):
+            self.webhook_notifier.notify_milestone(username, count, duration_sec, self.settings)
+
+    def open_creator_profile(self, username: str):
+        pixmap = self.avatar_pixmap_cache.get(username)
+        is_live = username in getattr(self, 'known_live', set())
+        is_tapper = self.favorites.get(username, True)
+        dialog = CreatorProfileDialog(username, self.stats_mgr, avatar_pixmap=pixmap, is_live=is_live, is_tapper_enabled=is_tapper, parent=self)
+        dialog.open_stream_requested.connect(self._open_stream_for_user)
+        dialog.exec()
+
+    def _open_stream_for_user(self, username: str):
+        if username in self.active_streams:
+            tab = self.active_streams[username]
+            if getattr(self, 'view_mode', 'tabs') == 'grid':
+                self._switch_to_tab_view()
+            idx = self.tabs.indexOf(tab)
+            if idx != -1:
+                self.tabs.setCurrentIndex(idx)
+        else:
+            if username in getattr(self, 'known_live', set()):
+                is_muted = self.settings.setdefault("muted_users", {}).get(username, True)
+                tapper_enabled = self.favorites.get(username, True)
+                tab = LiveTab(username, self.settings, tapper_enabled, is_muted, stats_mgr=self.stats_mgr, tabs_widget=self.tabs)
+                tab.stream_ended.connect(self._on_stream_ended_in_tab)
+                tab.milestone_reached.connect(self._on_milestone_reached)
+                prefix = "❤️ " if tapper_enabled else ""
+                idx = self.tabs.addTab(tab, f"{prefix}LIVE: @{username}")
+                self.tabs.setCurrentIndex(idx)
+                self.active_streams[username] = tab
+                self._update_waiting_tab()
+                self._update_active_tab_indicators()
+                if getattr(self, 'view_mode', 'tabs') == 'grid':
+                    self._refresh_grid_layout()
+
+    def open_notification_settings(self):
+        dialog = NotificationSettingsDialog(self.settings, self.webhook_notifier, self)
+        if dialog.exec():
+            SettingsManager.save_settings(self.settings)
+
+    def _toggle_view_mode(self):
+        if getattr(self, 'view_mode', 'tabs') == 'tabs':
+            self._switch_to_grid_view()
+        else:
+            self._switch_to_tab_view()
+
+    def _switch_to_grid_view(self):
+        self.view_mode = "grid"
+        self.btn_toggle_view.setText("📑 Tab View")
+        self.btn_toggle_view.setStyleSheet("""
+            QPushButton {
+                background-color: #FE2C55;
+                color: #ffffff;
+                border: 1px solid #FF5A79;
+                border-radius: 6px;
+                padding: 5px 10px;
+                font-weight: bold;
+                font-size: 8.5pt;
+                margin: 4px 2px;
+            }
+            QPushButton:hover {
+                background-color: #E0284D;
+            }
+        """)
+        self._refresh_grid_layout()
+        self.view_stack.setCurrentWidget(self.grid_scroll)
+
+    def _switch_to_tab_view(self):
+        self.view_mode = "tabs"
+        self.btn_toggle_view.setText("⊞ Grid View")
+        self.btn_toggle_view.setStyleSheet("""
+            QPushButton {
+                background-color: #232535;
+                color: #25F4EE;
+                border: 1px solid #364057;
+                border-radius: 6px;
+                padding: 5px 10px;
+                font-weight: bold;
+                font-size: 8.5pt;
+                margin: 4px 2px;
+            }
+            QPushButton:hover {
+                background-color: #2e3045;
+                color: #ffffff;
+            }
+        """)
+        for username, card in list(self.grid_cards.items()):
+            wv = card.detach_webview()
+            if username in self.active_streams and wv:
+                self.active_streams[username].attach_webview(wv)
+            card.deleteLater()
+        self.grid_cards.clear()
+        self.view_stack.setCurrentWidget(self.tabs)
+        self._on_tab_changed(self.tabs.currentIndex())
+
+    def _refresh_grid_layout(self):
+        if getattr(self, 'view_mode', 'tabs') != 'grid':
+            return
+
+        for u in list(self.grid_cards.keys()):
+            if u not in self.active_streams:
+                card = self.grid_cards.pop(u)
+                card.deleteLater()
+
+        for username, tab in self.active_streams.items():
+            if username not in self.grid_cards:
+                card = GridStreamCard(username, tab, self)
+                card.close_requested.connect(self._on_grid_close_stream)
+                card.pip_requested.connect(self._on_grid_pip_stream)
+                wv = tab.detach_webview(reason="Multi-Stream Grid")
+                if wv:
+                    card.attach_webview(wv)
+                self.grid_cards[username] = card
+
+        while self.grid_layout.count():
+            item = self.grid_layout.takeAt(0)
+
+        active_users = list(self.grid_cards.keys())
+        if not active_users:
+            empty_lbl = QLabel("No active live streams to display in Grid View.\\nStreams will appear here automatically when streamers go live.")
+            empty_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            empty_lbl.setStyleSheet("color: #777; font-size: 11pt; padding: 40px;")
+            self.grid_layout.addWidget(empty_lbl, 0, 0)
+            return
+
+        cols = 2 if len(active_users) <= 4 else 3
+        for i, u in enumerate(active_users):
+            r = i // cols
+            c = i % cols
+            self.grid_cards[u].show()
+            self.grid_layout.addWidget(self.grid_cards[u], r, c)
+
+    def _on_grid_pip_stream(self, username: str):
+        if username in self.grid_cards and username in self.active_streams:
+            card = self.grid_cards.pop(username)
+            wv = card.detach_webview()
+            tab = self.active_streams[username]
+            tab.attach_webview(wv)
+            card.deleteLater()
+            tab.open_pip()
+            self._refresh_grid_layout()
+
+    def _on_grid_close_stream(self, username: str):
+        if username in self.active_streams:
+            idx = self.tabs.indexOf(self.active_streams[username])
+            if idx != -1:
+                self.close_tab(idx)
 
 
 if __name__ == "__main__":
