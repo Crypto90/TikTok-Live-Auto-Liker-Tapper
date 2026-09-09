@@ -1,27 +1,29 @@
-# 🚀 TikTok Live Auto Liker v1.1.5
+# 🚀 TikTok Live Auto Liker v1.1.6
 
-A critical stability and performance release fixing **foreground auto-tapping speed** and the **Explore TikTok blank page issue** on Windows (Edge WebView2), macOS (WebKit), and Linux (QtWebEngine).
+A performance and stability release delivering **macOS live stats & verified like counting fixes**, **elimination of macOS live audio stuttering & buffer bloat**, and **Favorites list tab indicators with clean selection states**.
 
 ---
 
-## 🌟 What's New in v1.1.5
+## 🌟 What's New in v1.1.6
 
-### ⚡ Restored Blazing-Fast Foreground Auto-Tapping
-- **Resolved TikTok CSP Worker Blocking**: In v1.1.4, an inline Blob Web Worker was introduced to tick timers across background tabs. However, TikTok's Content Security Policy (CSP) does not permit `blob:` worker origins. When the browser blocked the worker, the tapping loop stalled waiting for worker messages, causing auto-tapping in the active foreground tab to slow down drastically.
-- **Native Recursive Tapper Loop**: Removed the CSP-blocked Web Worker and restored clean, jittered in-page recursive `setTimeout` execution with immediate first-tap dispatch. Active tabs tap instantly and smoothly at maximum rate (10–12+ taps/sec).
+### 📊 Fixed macOS Live Stats & Verified Like Counting
+- **PyObjC Type Normalization**: On macOS, Apple WebKit (`WKWebView.evaluateJavaScript:completionHandler:`) returns Objective-C collections (`__NSDictionaryM`, `__NSArrayM`, `objc.pyobjc_unicode`) rather than standard Python dictionaries. This caused Python's `isinstance(res, dict)` check in the live stats callback to fail, silently dropping stats on every second.
+- **Real-Time Stats Restored**: Live stats now update dynamically on macOS:
+  - Verified Likes counter increments with every server acknowledgment.
+  - Live Tap Rate (`⚡ X.X/s`) reflects accurate real-time speeds.
+  - Active Session Duration (`⏱️ mm:ss`) counts continuously.
+  - Verification Rate (`📶 100% Confirmed`) and tab titles (`(❤️ count)`) stay fully in sync.
 
-### 🎯 1-Second Batch Shortfall Catch-Up for Background Tabs
-- **Native Burst Engine (`burst_tapper`)**: Instead of running heavy Web Workers or excessive IPC calls, background tabs now utilize an intelligent 1-second shortfall catch-up.
-- **Accurate Tap Rates in Background**: When operating systems or browsers clamp background JavaScript timers to ~1 Hz, the Python controller measures the tap count delta each second and dispatches a single burst call (`burst_tapper(needed)`) to fulfill the configured tap rate.
-- **Zero Memory/IPC Overhead**: Strictly adheres to architectural guidelines with only 1 IPC call per second, ensuring zero memory leaks and no UI freezes across multiple background live streams.
+### 🔊 Eliminated macOS Live Audio Stuttering & Buffer Bloat
+- **Automated MediaSource Past-Buffer Eviction**: TikTok Live streams media via HTML5 `MediaSource` (MSE) using separate video and audio `SourceBuffer` tracks. Because TikTok's web player never purges past segments, WebKit's media memory previously grew unbounded over 10–20+ minutes of playback, leading to CoreAudio buffer underruns and severe audio crackling/stuttering.
+- **Continuous Sliding Window Cleaner**: Injected an automated media buffer cleaner running every 4 seconds that safely calls `sourceBuffer.remove(0, currentTime - 10)` to purge past audio and video chunks from WebKit's memory. Clamps memory to a constant, lean ~13-second window forever.
+- **AudioSession Playback Mode**: Automatically configures `navigator.audioSession.type = 'playback'` to prevent the macOS audio daemon (`audiod`) from throttling or lowering thread priority of WebKit's audio pipeline.
+- **Live Clock Drift Correction**: Continuously monitors the live edge buffer gap (`video.buffered.end - video.currentTime`). If playback lags by 2.5–6.0s, it gently catches up at 1.05x speed without audio pitch distortion; if drift exceeds 6s, it immediately jumps to the live edge.
 
-### 🧭 Fixed Explore TikTok Blank Page & Refresh
-- **Reliable Explore Tab Activation**: Fixed an issue where clicking the "Explore TikTok" tab resulted in a blank white page. Removed an overly strict stream guard that blocked navigation when no streamer tabs were currently active.
-- **Working Refresh Action**: Clicking the "Refresh" button while viewing the Explore tab now explicitly navigates to `https://www.tiktok.com/` instead of reloading `about:blank`.
-- **Protected Stream Closure**: Closing the last active streamer tab now blocks Qt tab signals during widget teardown, ensuring the user is cleanly returned to the "System Idle" screen without unintentionally triggering the Explore tab.
-
-### 🛡️ Cleaned Windows Edge WebView2 Composition
-- Removed experimental `--disable-features=CalculateNativeWinOcclusion` flags from process environment variables, which previously interfered with Microsoft Edge WebView2 HWND window composition and caused blank rendering on Windows.
+### 🎨 Clean Favorites List Selection & Active Tab Indicators
+- **Removed Solid Pink Row Selection**: Removed `selection-background-color: #FE2C55;` and configured `NoSelection` mode with transparent item selection/focus styling. Clicking a favorite no longer leaves an intrusive solid pink highlight that masks the pink "LIVE" text and active heart icon.
+- **Sleek Active Tab Left-Border Indicator**: Streamers with currently open tabs are now marked with a clean 3px TikTok-pink left border (`border-left: 3px solid #FE2C55;`) in the Favorites list. When a tab closes or the stream ends, the border cleanly transitions back to transparent.
+- **Quick-Switch to Open Streams**: Clicking a favorite whose live stream tab is already open now immediately focuses that streamer's active tab instead of doing nothing.
 
 ---
 
@@ -41,4 +43,4 @@ Simply download the archive or executable for your platform and replace your pre
 
 ## 💖 Support
 
-[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/K3K314GUP?ref=tiktok_live_auto_liker_release_115)
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/K3K314GUP?ref=tiktok_live_auto_liker_release_116)
