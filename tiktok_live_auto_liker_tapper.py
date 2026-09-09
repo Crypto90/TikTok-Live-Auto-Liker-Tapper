@@ -250,6 +250,7 @@ class UserListItem(QWidget):
         self.toggle_btn.setToolTip("Auto-Tapper: ON" if is_enabled else "Auto-Tapper: OFF")
 
     def set_muted(self, muted):
+        self.is_muted = muted
         if muted:
             self.mute_btn.setText("🔇")
             self.mute_btn.setStyleSheet("""
@@ -812,6 +813,7 @@ class GridStreamCard(QFrame):
         super().__init__(parent)
         self.username = username
         self.live_tab = live_tab
+        self.live_tab.grid_card = self
         self.setObjectName("gridCard")
         self.setStyleSheet("""
             QFrame#gridCard {
@@ -914,6 +916,8 @@ class GridStreamCard(QFrame):
             self.live_tab.webview.set_pip_mode(True)
 
     def detach_webview(self):
+        if hasattr(self.live_tab, 'grid_card') and self.live_tab.grid_card == self:
+            self.live_tab.grid_card = None
         if hasattr(self.live_tab, 'webview'):
             self.live_tab.webview.set_pip_mode(False)
         w = self.view_layout.takeAt(0)
@@ -922,6 +926,11 @@ class GridStreamCard(QFrame):
             wv.setParent(None)
             return wv
         return None
+
+    def closeEvent(self, event):
+        if hasattr(self.live_tab, 'grid_card') and self.live_tab.grid_card == self:
+            self.live_tab.grid_card = None
+        super().closeEvent(event)
 
     def _on_vol_changed(self, v):
         if hasattr(self.live_tab, 'set_volume'):
@@ -934,6 +943,7 @@ class GridStreamCard(QFrame):
 class LiveTab(QWidget):
     stream_ended = pyqtSignal(str, str)
     milestone_reached = pyqtSignal(str, int, int)  # (username, count, duration_seconds)
+    mute_state_changed = pyqtSignal(str, bool)  # (username, is_muted)
 
     # Recycle threshold: after 60 minutes, reload the stream to clear caches
     _RECYCLE_THRESHOLD_S = 60 * 60
@@ -957,13 +967,16 @@ class LiveTab(QWidget):
         self._live_rate = 0.0
         self._reached_milestones = set()
 
-        # Restore saved volume (0-100)
+        # Restore saved volume (0-100), ensuring volume and is_muted start strictly in sync
         saved_vol = self.settings.get("stream_volumes", {}).get(self.username)
-        if saved_vol is not None:
-            self.volume = int(saved_vol)
+        if self.is_muted:
+            self.volume = 0
+            self._last_nonzero_vol = int(saved_vol) if (saved_vol is not None and int(saved_vol) > 0) else 80
         else:
-            self.volume = 0 if self.is_muted else 100
+            self.volume = int(saved_vol) if (saved_vol is not None and int(saved_vol) > 0) else 80
+            self._last_nonzero_vol = self.volume
         self.pip_window = None
+        self.grid_card = None
 
         # Stream health tracking
         self._last_video_time = -1.0
@@ -1123,6 +1136,8 @@ class LiveTab(QWidget):
 
     def set_volume(self, vol):
         self.volume = max(0, min(100, int(vol)))
+        if self.volume > 0:
+            self._last_nonzero_vol = self.volume
         if hasattr(self, 'slider_vol') and self.slider_vol.value() != self.volume:
             self.slider_vol.blockSignals(True)
             self.slider_vol.setValue(self.volume)
@@ -1132,12 +1147,30 @@ class LiveTab(QWidget):
         if hasattr(self, 'btn_vol'):
             self.btn_vol.setText("🔇" if self.volume == 0 else "🔊")
 
+        # Sync attached PiP window slider if open
+        if hasattr(self, 'pip_window') and self.pip_window and hasattr(self.pip_window, 'hud'):
+            if hasattr(self.pip_window.hud, 'slider_vol') and self.pip_window.hud.slider_vol.value() != self.volume:
+                self.pip_window.hud.slider_vol.blockSignals(True)
+                self.pip_window.hud.slider_vol.setValue(self.volume)
+                self.pip_window.hud.slider_vol.blockSignals(False)
+
+        # Sync attached Grid card slider if open
+        if hasattr(self, 'grid_card') and self.grid_card and hasattr(self.grid_card, 'slider_vol'):
+            if self.grid_card.slider_vol.value() != self.volume:
+                self.grid_card.slider_vol.blockSignals(True)
+                self.grid_card.slider_vol.setValue(self.volume)
+                self.grid_card.slider_vol.blockSignals(False)
+
         is_muted = (self.volume == 0)
+        was_muted = getattr(self, 'is_muted', None)
         self.is_muted = is_muted
         self.webview.set_volume(self.volume / 100.0)
 
         self.settings.setdefault("stream_volumes", {})[self.username] = self.volume
         self.settings.setdefault("muted_users", {})[self.username] = is_muted
+
+        if was_muted is not None and was_muted != is_muted:
+            self.mute_state_changed.emit(self.username, is_muted)
 
     def _on_vol_slider_changed(self, val):
         self.set_volume(val)
@@ -1301,12 +1334,14 @@ class LiveTab(QWidget):
             self._signal_stream_ended("redirected_away_from_live")
 
     def set_muted(self, muted):
+        if self.is_muted == muted and ((muted and self.volume == 0) or (not muted and self.volume > 0)):
+            return
         self.is_muted = muted
         self.webview.set_muted(muted)
         if muted:
             self.set_volume(0)
-        elif self.volume == 0:
-            self.set_volume(80)
+        else:
+            self.set_volume(getattr(self, '_last_nonzero_vol', 80))
 
     def set_tapper_enabled(self, enabled):
         self.tapper_enabled = enabled
@@ -2823,6 +2858,7 @@ class TikTokAutoLikerApp(QMainWindow):
             tab = LiveTab(username, self.settings, tapper_enabled, is_muted, stats_mgr=self.stats_mgr, tabs_widget=self.tabs)
             tab.stream_ended.connect(self._on_stream_ended_in_tab)
             tab.milestone_reached.connect(self._on_milestone_reached)
+            tab.mute_state_changed.connect(self._on_stream_mute_changed)
 
             prefix = "❤️ " if tapper_enabled else ""
             idx = self.tabs.addTab(tab, f"{prefix}LIVE: @{username}")
@@ -2839,16 +2875,27 @@ class TikTokAutoLikerApp(QMainWindow):
             if idx != -1:
                 self.tabs.setCurrentIndex(idx)
 
+    def _on_stream_mute_changed(self, username, is_muted):
+        """Called whenever mute state changes from within a stream tab (top bar, PiP, or Grid)."""
+        muted_users = self.settings.setdefault("muted_users", {})
+        if muted_users.get(username) != is_muted:
+            muted_users[username] = is_muted
+            self.save_settings_ui()
+        if username in self.fav_widgets:
+            self.fav_widgets[username].set_muted(is_muted)
+        self._sort_list()
+
     def toggle_mute(self, username):
         if username in self.favorites:
             muted_users = self.settings.setdefault("muted_users", {})
             current = muted_users.get(username, True)
-            muted_users[username] = not current
-            self.fav_widgets[username].set_muted(not current)
+            new_muted = not current
+            muted_users[username] = new_muted
+            self.fav_widgets[username].set_muted(new_muted)
             self.save_settings_ui()
 
             if username in self.active_streams:
-                self.active_streams[username].set_muted(not current)
+                self.active_streams[username].set_muted(new_muted)
             self._sort_list()
 
     def toggle_tapper(self, username):
@@ -2872,6 +2919,7 @@ class TikTokAutoLikerApp(QMainWindow):
                 tab = LiveTab(username, self.settings, tapper_enabled=True, is_muted=is_muted, stats_mgr=self.stats_mgr, tabs_widget=self.tabs)
                 tab.stream_ended.connect(self._on_stream_ended_in_tab)
                 tab.milestone_reached.connect(self._on_milestone_reached)
+                tab.mute_state_changed.connect(self._on_stream_mute_changed)
                 idx = self.tabs.addTab(tab, f"❤️ LIVE: @{username}")
                 self.tabs.setCurrentIndex(idx)
                 self.active_streams[username] = tab
@@ -4133,6 +4181,7 @@ class TikTokAutoLikerApp(QMainWindow):
                 tab = LiveTab(username, self.settings, tapper_enabled, is_muted, stats_mgr=self.stats_mgr, tabs_widget=self.tabs)
                 tab.stream_ended.connect(self._on_stream_ended_in_tab)
                 tab.milestone_reached.connect(self._on_milestone_reached)
+                tab.mute_state_changed.connect(self._on_stream_mute_changed)
 
                 prefix = "❤️ " if tapper_enabled else ""
                 idx = self.tabs.addTab(tab, f"{prefix}LIVE: @{username}")
@@ -4336,6 +4385,7 @@ class TikTokAutoLikerApp(QMainWindow):
                 tab = LiveTab(username, self.settings, tapper_enabled, is_muted, stats_mgr=self.stats_mgr, tabs_widget=self.tabs)
                 tab.stream_ended.connect(self._on_stream_ended_in_tab)
                 tab.milestone_reached.connect(self._on_milestone_reached)
+                tab.mute_state_changed.connect(self._on_stream_mute_changed)
                 prefix = "❤️ " if tapper_enabled else ""
                 idx = self.tabs.addTab(tab, f"{prefix}LIVE: @{username}")
                 self.tabs.setCurrentIndex(idx)
