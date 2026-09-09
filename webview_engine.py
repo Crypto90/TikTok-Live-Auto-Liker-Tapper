@@ -42,6 +42,89 @@ except ImportError:
     HAS_QT_WEBENGINE = False
 
 
+PIP_PLAYER_ISOLATE_JS = """(function() {
+    var id = '__tiktok_pip_isolated_player__';
+    var style = document.getElementById(id);
+    if (!style) {
+        style = document.createElement('style');
+        style.id = id;
+        document.head.appendChild(style);
+    }
+    style.textContent = `
+        html, body {
+            overflow: hidden !important;
+            background: #000000 !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            width: 100vw !important;
+            height: 100vh !important;
+        }
+        /* Completely hide TikTok side navigation, top header, chat room, gift panel, bottom controls */
+        header, aside, nav, footer,
+        [data-e2e*="nav"], [data-e2e*="side"], [data-e2e*="header"], [data-e2e*="chat"],
+        [data-e2e*="comment"], [data-e2e*="footer"],
+        [class*="Header"], [class*="SideNav"], [class*="LeftContainer"],
+        [class*="ChatRoom"], [class*="ChatContainer"], [class*="CommentList"],
+        [class*="BottomControls"], [class*="Gift"], [class*="ShareContainer"],
+        [class*="FollowContainer"], [class*="DivSideNav"], [class*="ActionContainer"] {
+            display: none !important;
+            visibility: hidden !important;
+            opacity: 0 !important;
+            pointer-events: none !important;
+            width: 0 !important;
+            height: 0 !important;
+            max-width: 0 !important;
+            max-height: 0 !important;
+        }
+        /* Reset containers holding the video player */
+        main, #main-content-live-room, div[class*="RoomContainer"], div[class*="PlayerContainer"], div[class*="VideoContainer"] {
+            position: fixed !important;
+            top: 0 !important;
+            left: 0 !important;
+            width: 100vw !important;
+            height: 100vh !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            border: none !important;
+            transform: none !important;
+            z-index: 1000 !important;
+            background: #000000 !important;
+        }
+        /* Force the video element to fill 100% of the viewport */
+        video {
+            position: fixed !important;
+            top: 0 !important;
+            left: 0 !important;
+            width: 100vw !important;
+            height: 100vh !important;
+            max-width: 100vw !important;
+            max-height: 100vh !important;
+            z-index: 2147483640 !important;
+            object-fit: contain !important;
+            background: #000000 !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            border: none !important;
+        }
+    `;
+    var v = document.querySelector('video');
+    if (v) {
+        var p = v.parentElement;
+        while (p && p !== document.body) {
+            p.style.transform = 'none';
+            p.style.margin = '0';
+            p.style.padding = '0';
+            p = p.parentElement;
+        }
+    }
+})();"""
+
+PIP_PLAYER_RESTORE_JS = """(function() {
+    var el = document.getElementById('__tiktok_pip_isolated_player__');
+    if (el) el.remove();
+})();"""
+
+
 TAPPER_IN_PAGE_SCRIPT = """
 (function() {
     if (window.__tiktokAutoTapperInstalled) {
@@ -705,6 +788,10 @@ if HAS_MAC_WEBKIT:
                 """
             self.evaluate_js(js)
 
+        def set_pip_mode(self, enabled: bool):
+            """Isolate live video player to fill 100% of viewport and hide all website chrome/sidebars."""
+            self.evaluate_js(PIP_PLAYER_ISOLATE_JS if enabled else PIP_PLAYER_RESTORE_JS)
+
         def inject_in_page_tapper(self, base_ms=100, rand_ms=50, enabled=True):
             """Injects the tapping engine and starts the loop natively inside the browser."""
             setup_call = f"window.__tiktokStartTapper({base_ms}, {rand_ms}, {'true' if enabled else 'false'});"
@@ -940,6 +1027,10 @@ if HAS_WIN_WEBVIEW2:
                 """
             self.evaluate_js(js)
 
+        def set_pip_mode(self, enabled: bool):
+            """Isolate live video player to fill 100% of viewport and hide all website chrome/sidebars."""
+            self.evaluate_js(PIP_PLAYER_ISOLATE_JS if enabled else PIP_PLAYER_RESTORE_JS)
+
         def inject_in_page_tapper(self, base_ms=100, rand_ms=50, enabled=True):
             setup_call = f"window.__tiktokStartTapper({base_ms}, {rand_ms}, {'true' if enabled else 'false'});"
             full_js = TAPPER_IN_PAGE_SCRIPT + "\n" + setup_call
@@ -1125,6 +1216,10 @@ if HAS_QT_WEBENGINE:
                 """
             self.evaluate_js(js)
 
+        def set_pip_mode(self, enabled: bool):
+            """Isolate live video player to fill 100% of viewport and hide all website chrome/sidebars."""
+            self.evaluate_js(PIP_PLAYER_ISOLATE_JS if enabled else PIP_PLAYER_RESTORE_JS)
+
         def inject_in_page_tapper(self, base_ms=100, rand_ms=50, enabled=True):
             setup_call = f"window.__tiktokStartTapper({base_ms}, {rand_ms}, {'true' if enabled else 'false'});"
             full_js = TAPPER_IN_PAGE_SCRIPT + "\n" + setup_call
@@ -1286,6 +1381,10 @@ class UniversalWebView(QWidget):
 
     def set_background_mode(self, is_background):
         self._engine.set_background_mode(is_background)
+
+    def set_pip_mode(self, enabled: bool):
+        if hasattr(self._engine, "set_pip_mode"):
+            self._engine.set_pip_mode(enabled)
 
     def inject_in_page_tapper(self, base_ms=100, rand_ms=50, enabled=True):
         self._engine.inject_in_page_tapper(base_ms, rand_ms, enabled)

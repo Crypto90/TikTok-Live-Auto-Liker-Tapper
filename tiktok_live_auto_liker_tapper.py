@@ -544,103 +544,203 @@ class LiveChecker(QObject):
 
 
 
+class PipHudOverlay(QFrame):
+    """Semi-transparent floating glassmorphic HUD overlay for the PiP player."""
+    def __init__(self, pip_window):
+        super().__init__(pip_window)
+        self.pip_window = pip_window
+        self.setObjectName("pipHud")
+        self.setStyleSheet("""
+            QFrame#pipHud {
+                background-color: rgba(14, 15, 24, 0.88);
+                border: 1px solid rgba(255, 255, 255, 0.16);
+                border-radius: 17px;
+            }
+            QLabel {
+                color: #e0e0e0;
+                font-size: 11px;
+                font-weight: 500;
+            }
+        """)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 0, 8, 0)
+        layout.setSpacing(8)
+
+        lbl_live = QLabel("🔴", self)
+        lbl_live.setStyleSheet("font-size: 8px;")
+        layout.addWidget(lbl_live)
+
+        self.lbl_user = QLabel(f"<b>@{self.pip_window.username}</b>", self)
+        self.lbl_user.setStyleSheet("color: #00f2fe; font-size: 11.5px;")
+        layout.addWidget(self.lbl_user)
+
+        self.lbl_likes = QLabel("❤️ 0", self)
+        self.lbl_likes.setStyleSheet("color: #ff2d55; font-size: 11px; font-weight: bold;")
+        layout.addWidget(self.lbl_likes)
+
+        layout.addStretch()
+
+        # Aspect ratio toggle button (9:16 portrait vs 16:9 landscape)
+        self.btn_aspect = QToolButton(self)
+        self.btn_aspect.setText("📱 9:16")
+        self.btn_aspect.setToolTip("Toggle Aspect Ratio: Portrait (9:16) / Landscape (16:9)")
+        self.btn_aspect.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_aspect.setStyleSheet("""
+            QToolButton {
+                background: rgba(255, 255, 255, 0.08);
+                color: #e0e0e0;
+                font-size: 10px;
+                font-weight: 600;
+                padding: 3px 7px;
+                border-radius: 10px;
+                border: 1px solid rgba(255, 255, 255, 0.12);
+            }
+            QToolButton:hover {
+                background: rgba(255, 255, 255, 0.20);
+                color: #ffffff;
+            }
+        """)
+        self.btn_aspect.clicked.connect(self.pip_window.toggle_aspect_ratio)
+        layout.addWidget(self.btn_aspect)
+
+        # Compact Volume slider
+        self.slider_vol = QSlider(Qt.Orientation.Horizontal, self)
+        self.slider_vol.setRange(0, 100)
+        vol_val = self.pip_window.live_tab.volume if hasattr(self.pip_window.live_tab, 'volume') else 80
+        self.slider_vol.setValue(vol_val)
+        self.slider_vol.setFixedWidth(55)
+        self.slider_vol.setStyleSheet("""
+            QSlider::groove:horizontal { border: none; height: 3px; background: #333647; border-radius: 1px; }
+            QSlider::sub-page:horizontal { background: #25F4EE; border-radius: 1px; }
+            QSlider::handle:horizontal { background: #ffffff; border: 1px solid #25F4EE; width: 8px; margin-top: -3px; margin-bottom: -3px; border-radius: 4px; }
+        """)
+        self.slider_vol.valueChanged.connect(self.pip_window._on_vol_changed)
+        layout.addWidget(self.slider_vol)
+
+        # Dock Back button
+        self.btn_dock = QPushButton("⤓ Dock", self)
+        self.btn_dock.setToolTip("Return stream to main window")
+        self.btn_dock.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_dock.setStyleSheet("""
+            QPushButton {
+                background-color: #25F4EE;
+                color: #121212;
+                font-size: 10.5px;
+                font-weight: bold;
+                padding: 3px 10px;
+                border-radius: 11px;
+                border: none;
+            }
+            QPushButton:hover { background-color: #1ed1cb; }
+        """)
+        self.btn_dock.clicked.connect(self.pip_window._request_dock_back)
+        layout.addWidget(self.btn_dock)
+
+    def update_likes(self, count):
+        self.lbl_likes.setText(f"❤️ {count:,}")
+
+
 class PipWindow(QDialog):
-    """Floating, always-on-top Picture-in-Picture mini player for a live stream."""
+    """Floating, always-on-top Picture-in-Picture player for a live stream."""
     dock_back_requested = pyqtSignal(str)
 
     def __init__(self, username, live_tab, parent=None):
         super().__init__(parent)
         self.username = username
         self.live_tab = live_tab
-        self.setWindowTitle(f"PiP: @{self.username} — TikTok Live Auto Liker")
+        self._is_portrait = True
+        self.setWindowTitle(f"@{self.username} — Live")
         self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.WindowStaysOnTopHint)
-        self.resize(520, 340)
-        self.setMinimumSize(320, 200)
-        self.setStyleSheet("""
-            QDialog {
-                background-color: #0e0f14;
-            }
-        """)
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
+        # Default to 9:16 portrait ratio (340x600) matching vertical mobile stream
+        self.resize(340, 600)
+        self.setMinimumSize(200, 200)
+        self.setStyleSheet("QDialog { background-color: #000000; }")
 
-        # Header bar
-        self.top_bar = QWidget(self)
-        self.top_bar.setFixedHeight(34)
-        self.top_bar.setStyleSheet("""
-            QWidget {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #1a1a26, stop:1 #13131c);
-                border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-            }
-            QLabel {
-                color: #e0e0e0;
-                font-size: 11px;
-            }
-        """)
-        tb_layout = QHBoxLayout(self.top_bar)
-        tb_layout.setContentsMargins(10, 0, 8, 0)
-        tb_layout.setSpacing(8)
+        # Full-bleed layout: 0 margins, video container fills 100%
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
 
-        lbl_pip_icon = QLabel("⧉", self.top_bar)
-        lbl_pip_icon.setStyleSheet("color: #25F4EE; font-size: 12px; font-weight: bold;")
-        tb_layout.addWidget(lbl_pip_icon)
-
-        self.lbl_title = QLabel(f"<b>@{self.username}</b>", self.top_bar)
-        self.lbl_title.setStyleSheet("color: #00f2fe; font-size: 11.5px;")
-        tb_layout.addWidget(self.lbl_title)
-
-        self.lbl_likes = QLabel("❤️ 0", self.top_bar)
-        self.lbl_likes.setStyleSheet("color: #ff2d55; font-size: 11px; font-weight: bold;")
-        tb_layout.addWidget(self.lbl_likes)
-
-        tb_layout.addStretch()
-
-        # Volume slider in PiP
-        self.slider_vol = QSlider(Qt.Orientation.Horizontal, self.top_bar)
-        self.slider_vol.setRange(0, 100)
-        self.slider_vol.setValue(self.live_tab.volume if hasattr(self.live_tab, 'volume') else 80)
-        self.slider_vol.setFixedWidth(65)
-        self.slider_vol.setStyleSheet("""
-            QSlider::groove:horizontal { border: none; height: 3px; background: #333647; border-radius: 1px; }
-            QSlider::sub-page:horizontal { background: #25F4EE; border-radius: 1px; }
-            QSlider::handle:horizontal { background: #ffffff; border: 1px solid #25F4EE; width: 8px; margin-top: -3px; margin-bottom: -3px; border-radius: 4px; }
-        """)
-        self.slider_vol.valueChanged.connect(self._on_vol_changed)
-        tb_layout.addWidget(self.slider_vol)
-
-        # Dock Back button
-        self.btn_dock = QPushButton("⤓ Dock Back", self.top_bar)
-        self.btn_dock.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_dock.setStyleSheet("""
-            QPushButton {
-                background-color: #25F4EE;
-                color: #121212;
-                font-size: 10px;
-                font-weight: bold;
-                padding: 3px 10px;
-                border-radius: 4px;
-            }
-            QPushButton:hover { background-color: #1ed1cb; }
-        """)
-        self.btn_dock.clicked.connect(self._request_dock_back)
-        tb_layout.addWidget(self.btn_dock)
-
-        layout.addWidget(self.top_bar)
-
-        # Video container
         self.video_container = QWidget(self)
         self.video_layout = QVBoxLayout(self.video_container)
         self.video_layout.setContentsMargins(0, 0, 0, 0)
         self.video_layout.setSpacing(0)
-        layout.addWidget(self.video_container, 1)
+        main_layout.addWidget(self.video_container, 1)
+
+        # Floating HUD Overlay
+        self.hud = PipHudOverlay(self)
+        self.hud.raise_()
+
+        # Auto-hide HUD after 3.5s of inactivity
+        self.hide_timer = QTimer(self)
+        self.hide_timer.setSingleShot(True)
+        self.hide_timer.timeout.connect(self._fade_hud_out)
+
+        # Periodic enforcer to ensure clean video player mode persists across stream buffer switches
+        self.enforce_timer = QTimer(self)
+        self.enforce_timer.setInterval(2500)
+        self.enforce_timer.timeout.connect(self._enforce_clean_player)
+
+        self.setMouseTracking(True)
+        self._reposition_hud()
+        self._show_hud()
+
+    def _reposition_hud(self):
+        w = min(self.width() - 16, 360)
+        x = (self.width() - w) // 2
+        self.hud.setGeometry(x, 12, w, 34)
+        self.hud.raise_()
+
+    def _show_hud(self):
+        self.hud.show()
+        self.hud.raise_()
+        self.hide_timer.start(3500)
+
+    def _fade_hud_out(self):
+        if self.hud.underMouse():
+            self.hide_timer.start(2000)
+            return
+        self.hud.hide()
+
+    def enterEvent(self, event):
+        super().enterEvent(event)
+        self._show_hud()
+
+    def mouseMoveEvent(self, event):
+        super().mouseMoveEvent(event)
+        self._show_hud()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._reposition_hud()
+        self._show_hud()
+
+    def toggle_aspect_ratio(self):
+        self._is_portrait = not self._is_portrait
+        if self._is_portrait:
+            self.hud.btn_aspect.setText("📱 9:16")
+            self.resize(340, 600)
+        else:
+            self.hud.btn_aspect.setText("🖥️ 16:9")
+            self.resize(600, 340)
+        self._reposition_hud()
+        self._show_hud()
 
     def attach_webview(self, webview):
         self.video_layout.addWidget(webview)
         webview.show()
+        if hasattr(self.live_tab, 'webview'):
+            self.live_tab.webview.set_pip_mode(True)
+        self.enforce_timer.start()
+        self._reposition_hud()
+        self._show_hud()
 
     def detach_webview(self):
+        self.enforce_timer.stop()
+        if hasattr(self.live_tab, 'webview'):
+            self.live_tab.webview.set_pip_mode(False)
         w = self.video_layout.takeAt(0)
         if w and w.widget():
             wv = w.widget()
@@ -648,18 +748,28 @@ class PipWindow(QDialog):
             return wv
         return None
 
+    def _enforce_clean_player(self):
+        if hasattr(self.live_tab, 'webview'):
+            self.live_tab.webview.set_pip_mode(True)
+
     def update_likes(self, verified_likes):
-        self.lbl_likes.setText(f"❤️ {verified_likes:,}")
+        self.hud.update_likes(verified_likes)
 
     def _on_vol_changed(self, v):
         if hasattr(self.live_tab, 'set_volume'):
             self.live_tab.set_volume(v)
 
     def _request_dock_back(self):
+        self.enforce_timer.stop()
+        if hasattr(self.live_tab, 'webview'):
+            self.live_tab.webview.set_pip_mode(False)
         self.dock_back_requested.emit(self.username)
         self.close()
 
     def closeEvent(self, event):
+        self.enforce_timer.stop()
+        if hasattr(self.live_tab, 'webview'):
+            self.live_tab.webview.set_pip_mode(False)
         self.dock_back_requested.emit(self.username)
         event.accept()
 
@@ -771,8 +881,12 @@ class GridStreamCard(QFrame):
     def attach_webview(self, webview):
         self.view_layout.addWidget(webview)
         webview.show()
+        if hasattr(self.live_tab, 'webview'):
+            self.live_tab.webview.set_pip_mode(True)
 
     def detach_webview(self):
+        if hasattr(self.live_tab, 'webview'):
+            self.live_tab.webview.set_pip_mode(False)
         w = self.view_layout.takeAt(0)
         if w and w.widget():
             wv = w.widget()
