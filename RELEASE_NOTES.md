@@ -1,25 +1,21 @@
-# 🚀 TikTok Live Auto Liker v1.1.8
+# 🚀 TikTok Live Auto Liker v1.1.9
 
-A targeted refinement and stability release introducing **Pure Video Isolation in Picture-in-Picture (PiP)**, a **Continuous Likes Count Badge** when controls auto-hide, and a critical fix for **live stream reloading/hiccups**.
+A stability and polish release delivering **full bidirectional synchronization of mute and volume states across all UI surfaces** and resolving a **desktop notification testing crash**.
 
 ---
 
-## 🌟 What's New in v1.1.8
+## 🌟 What's New in v1.1.9
 
-### 🎬 Pure Video Isolation in Picture-in-Picture (PiP)
-- **Zero Website Clutter**: The floating PiP window now strictly isolates the live video player. All surrounding TikTok web chrome—including the left navigation bar, bottom gift drawer ("Rose 1, Rosa 10"), and stream recommendation feeds—are completely suppressed.
-- **Hidden Native Player Overlays**: Built-in video controls (`xg-bar`, `xg-controls`, play/pause icons, reload icons, live duration counters) are cleanly hidden inside the player, leaving only the pure live video stream and our custom floating controls.
-- **Perfect Aspect Ratio Containment**: Video fills 100% of the floating window with sleek black letterboxing during freeform resizing and aspect ratio switches (📱 9:16 portrait vs 🖥️ 16:9 landscape).
-- **Non-Destructive Restoration**: Re-docking the stream back into standard tabs seamlessly restores all original page elements and styles.
+### 🔊 Bidirectional Mute & Volume Synchronization
+- **Complete Multi-Surface Harmony**: Adjusting volume or toggling mute on a streamer's top bar now instantly updates their speaker icon (`🔊` / `🔇`) in the left favorites list, and vice versa.
+- **PiP & Grid Sync**: Volume sliders in Picture-in-Picture (PiP) and Multi-Stream Grid cards remain in lockstep with the active tab and the favorites list.
+- **Accurate Tab Initialization**: When opening a streamer's tab who is set to muted, the stream starts strictly at 0% volume while remembering their previous volume level, ensuring that unmuting cleanly restores the desired listening level.
+- **Dynamic Re-sorting**: Mute state changes immediately trigger list re-sorting when sorting favorites by mute status.
 
-### ❤️ Continuous Verified Likes Counter Badge
-- **Always Visible**: When the top HUD controls bar automatically fades out after 3.5s of inactivity, a sleek, semi-transparent mini badge (`❤️ {count:,}`) remains visible in the upper-left corner.
-- **Real-Time Synchronized**: Counts update dynamically alongside live in-page tapping responses and server verifications.
-- **Pass-Through Hover Control**: Moving your mouse anywhere over the window (including over the badge) instantly and smoothly restores the full HUD overlay and playback controls.
-
-### 🛡️ Live Stream Stability & Playback Hiccup Fix
-- **Eliminated 30–60s Stream "Hick" / Reload Bug**: Identified and removed background MediaSource buffer pruning and forced playhead seeks (`video.currentTime = liveEdge - 0.8`). Live streams now play continuously without decoder pipeline resets, stalls, or visual reloads.
-- **Lightweight AudioSession Keep-Alive**: Retains standard Apple WebKit `navigator.audioSession.type = 'playback'` to prevent background throttling by macOS `audiod` without altering stream buffers.
+### 🔔 Desktop Notification Test Fix & macOS Fallback
+- **Crash Resolution**: Resolved a `TypeError` when clicking **"Test Desktop Notification"** inside the Alerts & Webhooks settings dialog.
+- **Instant Test Delivery**: Test notifications now display immediately without requiring pre-saved settings changes.
+- **Native macOS Fallback**: Added a native AppleScript (`osascript`) notification fallback on macOS in the event `QSystemTrayIcon` is temporarily unavailable.
 
 ---
 
@@ -39,4 +35,4 @@ Simply download the archive or executable for your platform and replace your pre
 
 ## 💖 Support
 
-[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/K3K314GUP?ref=tiktok_live_auto_liker_release_118)
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/K3K314GUP?ref=tiktok_live_auto_liker_release_119)
