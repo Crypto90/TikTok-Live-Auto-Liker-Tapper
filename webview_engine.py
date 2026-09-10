@@ -228,11 +228,7 @@ TAPPER_IN_PAGE_SCRIPT = """
                                 var clone = response.clone();
                                 clone.json().then(function(data) {
                                     if (data && data.status_code === 0) {
-                                        var confirmed = batchCount;
-                                        if (data.data && typeof data.data.count === 'number' && data.data.count > 0) {
-                                            confirmed = data.data.count;
-                                        }
-                                        stats.verified += confirmed;
+                                        stats.verified += batchCount;
                                         stats.lastAckTime = Date.now();
                                         if (data.data && typeof data.data.like_count === 'number') {
                                             stats.roomLikes = data.data.like_count;
@@ -301,11 +297,7 @@ TAPPER_IN_PAGE_SCRIPT = """
                                     var data = null;
                                     try { data = JSON.parse(xhr.responseText); } catch(e) {}
                                     if (data && data.status_code === 0) {
-                                        var confirmed = batchCount;
-                                        if (data.data && typeof data.data.count === 'number' && data.data.count > 0) {
-                                            confirmed = data.data.count;
-                                        }
-                                        stats.verified += confirmed;
+                                        stats.verified += batchCount;
                                         stats.lastAckTime = Date.now();
                                         if (data.data && typeof data.data.like_count === 'number') {
                                             stats.roomLikes = data.data.like_count;
@@ -343,7 +335,7 @@ TAPPER_IN_PAGE_SCRIPT = """
         var deltaD = stats.dispatched - adaptWindow.dispatched;
         if (deltaD >= 20 && (now - adaptWindow.lastCheckTime) >= 3500) {
             var deltaV = stats.verified - adaptWindow.verified;
-            var windowRatio = deltaD > 0 ? (deltaV / deltaD) : 1.0;
+            var windowRatio = deltaD > 0 ? Math.min(1.0, deltaV / deltaD) : 1.0;
 
             if (stats.lastAckTime > 0) {
                 if (windowRatio < 0.78) {
