@@ -36,7 +36,7 @@ def _qt_message_handler(mode, context, message):
         return
 
 
-APP_VERSION = "v1.2.0"
+APP_VERSION = "v1.2.1"
 GITHUB_REPO = "Crypto90/TikTok-Live-Auto-Liker-Tapper"
 
 
@@ -1304,7 +1304,7 @@ class LiveTab(QWidget):
         self.lbl_rate.setText(f"⚡ <b>{self._live_rate}/s</b>")
         self.lbl_timer.setText(f"⏱️ <b>{time_str}</b>")
 
-        rate_pct = round((verified / max(1, dispatched)) * 100.0, 1) if dispatched > 0 else 100.0
+        rate_pct = min(100.0, round((verified / max(1, dispatched)) * 100.0, 1)) if dispatched > 0 else 100.0
         cur_delay = res.get('currentDelay')
         delay_info = f" ({cur_delay}ms)" if cur_delay else ""
         self.lbl_confirmed.setText(f"📶 <b>{rate_pct}% Confirmed</b>{delay_info}")

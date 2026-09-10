@@ -93,7 +93,7 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          name: "v1.2.0 - Adaptive Like Throttling & 90%+ Confirmation Rate"
+          name: "v1.2.1 - 100% Confirmed Rate Clamping & Sniffer Hardening"
           body_path: RELEASE_NOTES.md
           files: |
             release_assets/TikTokLiveAutoLiker.exe
