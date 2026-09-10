@@ -12,8 +12,22 @@
   <h1>⚡ TikTok Live Auto Liker / Tapper ⚡</h1>
 
   <p><b>High-Performance Desktop Application (macOS, Windows, Linux) & 24/7 Headless Linux Server</b></p>
-  <p>100% Server-Verified Likes • Real-Time Stats Bar • Stream Session Lifecycle Tracking • Multi-Device Cloud Sync</p>
+  <p>Smart Adaptive Auto-Throttling • 90%+ Server Confirmation • Isolated Picture-in-Picture • Multi-Stream Grid • Multi-Device Cloud Sync</p>
 </div>
+
+---
+
+## 🌟 Highlights & Newest Capabilities
+
+- 🧠 **Smart Adaptive Auto-Throttling**: Closed-loop PID-style rate optimizer automatically monitors TikTok's client/server debounce and self-tunes delays in real time to guarantee **90%+ server confirmation rates**.
+- 🎯 **Clean Hotkey Dispatching**: Replaced dual-event collisions with native, bubbling `'L'` keypresses matching TikTok's desktop player architecture with built-in chat input safeguards.
+- 🖼️ **Isolated Picture-in-Picture (PiP)**: Compact, always-on-top floating window that strips out TikTok's chat, gift menus, and UI chrome to display **only the pure live video** with overlay controls.
+- 🔲 **Multi-Stream Video Grid**: Monitor and like multiple live creators simultaneously in a responsive grid layout with per-card controls.
+- 🔊 **Bidirectional Audio & Mute Sync**: Volume sliders and mute toggles stay in instantaneous lockstep across the Stream Top Bar, Favorites List, PiP Overlay, and Grid Cards.
+- 🔔 **Multi-Channel Alerts**: Native desktop notifications, plus **Discord webhooks** and **Telegram bot** alerts when creators go live or reach major like milestones (10k, 25k, 50k, 100k, 250k, 500k, 1M).
+- ⏱️ **100% Server-Verified Like Accounting**: Dual-layer network sniffer intercepts HTTP `/webcast/room/like` and `/webcast/room/digg` across `fetch` and `XMLHttpRequest`, confirming `status_code === 0` before crediting.
+- ☁️ **Multi-Device Cloud & Cookie Sync**: Synchronize favorites, audio settings, and authenticated TikTok login cookies across macOS, Windows, and Linux via Shared Folders (Google Drive / Dropbox / OneDrive), WebDAV (Nextcloud), or REST API.
+- 🖥️ **Tri-Platform Native Web Engines**: Apple WebKit (`WKWebView`) on macOS, Microsoft Edge WebView2 on Windows, and QtWebEngine Chromium on Linux.
 
 ---
 
@@ -23,7 +37,7 @@
 
 <div align="center">
   <img src="screenshots/desktop_main_window.png" alt="Desktop Application Main Window" width="100%" style="border-radius: 10px; border: 1px solid #282e3d; margin-bottom: 16px;">
-  <p><i>Live stream viewer with real-time floating verified stats bar, dynamic ticking tab titles, multi-criteria sorting, and per-creator audio toggles.</i></p>
+  <p><i>Desktop application featuring the live stream player, glassmorphism verified stats bar, dynamic pulsing tab badges, creator favorites sorting, and volume controls.</i></p>
 </div>
 
 <br>
@@ -53,7 +67,7 @@
 
 ### 🌐 24/7 Headless Linux Server & Responsive Web Dashboard
 
-Run unmonitored on home servers, Raspberry Pi, or cloud VPS instances with a beautiful dark-mode browser dashboard on `http://server-ip:8080`.
+Run unmonitored on home servers, Raspberry Pi, or cloud VPS instances with a sleek dark-mode browser dashboard on `http://server-ip:8080`.
 
 <div align="center">
   <img src="screenshots/web_dashboard_active_streams.png" alt="Web Dashboard Active Streams" width="100%" style="border-radius: 10px; border: 1px solid #282e3d; margin-bottom: 16px;">
@@ -76,70 +90,111 @@ Run unmonitored on home servers, Raspberry Pi, or cloud VPS instances with a bea
 
 ---
 
-## 🚀 Key Features
+## 🚀 In-Depth Feature Breakdown
 
-### 🎯 100% Server-Verified Like Counting
-- **Dual Network Interception**: Transparently intercepts outgoing HTTP requests to `/webcast/room/like` and `/webcast/room/digg` across both `fetch` and `XMLHttpRequest`.
-- **Response Validation**: Parses server payloads and verifies `status_code === 0` before registering likes. Failed requests and rate limits are tracked separately and excluded from totals.
-- **Mathematical Accuracy**: Local UI displays instant dispatched clicks while the verified counter updates only on confirmed server acknowledgment.
+### 🧠 Smart Adaptive Auto-Throttling (90%+ Confirmation Rate)
+- **Closed-Loop Feedback Controller**: Evaluates incoming server acknowledgments against dispatched taps every 20 taps.
+- **Dynamic Throttle Backoff**: When network congestion or TikTok's client debounce drops confirmation below 78%, base delay smoothly backs off by `+15ms` (up to 260ms max).
+- **Intelligent Speed Probing**: When delivery is flawless (≥90%), the engine gently probes faster by `-5ms` (down to 130ms min), finding the maximum like rate TikTok will accept.
+- **Sweet-Spot Defaults**: Defaults to **165ms Base Delay + 35ms Jitter** (~182ms interval), precisely respecting TikTok's ~180ms client debounce window.
+- **Live Latency Feedback**: Displays real-time adaptive speed directly inside the stats bar (e.g. `📶 98.4% Confirmed (165ms)`).
+- **Debounce-Respecting Bursts**: Background and minimized tabs use micro-spaced catch-up bursts (`Math.max(160, baseDelay)` ms) rather than instantaneous zero-delay floods.
 
-### ⏱️ Live Floating Stats Bar & Dynamic Tabs
-- **Glassmorphism Stats Bar**: Embedded directly above the live stream player displaying:
-  - ❤️ **Verified Likes**: Live ticking counter updating with every acknowledged batch.
-  - ⚡ **Rate**: Current live throughput (`likes/second`).
-  - ⏱️ **Session Duration**: Active watch time timer (`mm:ss` / `hh:mm:ss`).
-  - 📶 **Confirmed %**: Delivery confirmation percentage.
-- **Dynamic Tab Badges**: Tab titles tick up live as likes are delivered: `❤️ LIVE: @streamer (❤️ 14,820)`.
+### 🖼️ Video-Only Picture-in-Picture (PiP) Window
+- **Always-on-Top Floating Window**: Detaches any active stream into a floating, resizable mini-player.
+- **Video Element Isolation**: Injects CSS/JS rules to hide chat feeds, gift menus, top navigation headers, and recommendation sidebars, leaving **only the pure video feed**.
+- **Glassmorphism Overlay**: Hovering reveals live verified likes count (`❤️ 14,250`), mute toggle (`🔊`/`🔇`), volume slider, and one-click dock-back button.
+- **Seamless State Restoration**: Closing or docking back cleanly restores the full TikTok web interface without reloading or interrupting video playback.
+
+### 🔲 Multi-Stream Video Grid (Multi-View)
+- **Simultaneous Multi-Live Monitoring**: Watch and like up to 4+ live creators concurrently in an adaptive multi-view grid.
+- **Independent Card Controls**: Each grid card features its own volume slider, mute toggle, like count indicator, and auto-tapper on/off switch.
+
+### 🔊 Bidirectional Audio & Mute Synchronization
+- **Universal Synchronization**: Changing volume or mute on a streamer's top bar instantly reflects on their speaker icon (`🔊` / `🔇`) in the favorites list, and vice versa.
+- **PiP & Grid Alignment**: PiP window and Multi-Stream Grid cards remain in lockstep with the active tab.
+- **Smart Muted Tab Initialization**: Streams opened while muted initialize at 0% volume while remembering your preferred volume setting, so unmuting cleanly restores the desired level.
+
+### 🔔 Multi-Channel Alerts (Desktop, Discord & Telegram)
+- **Native OS Notifications**: Native notification toasts on macOS, Windows, and Linux (with native AppleScript `osascript` fallback on macOS).
+- **Discord Webhook Alerts**: Formatted rich embeds sent to your Discord channel when a favorited streamer goes live or achieves milestone likes.
+- **Telegram Bot Alerts**: Instant messages delivered directly to your Telegram chat or group.
+- **Like Milestones**: Configurable alerts for major achievements: **10k, 25k, 50k, 100k, 250k, 500k, and 1,000,000 likes**.
+- **One-Click Diagnostic Testing**: Test buttons in the settings dialog let you verify notification delivery instantly.
+
+### ⏱️ 100% Server-Verified Like Counting
+- **Dual Network Interception**: Hooks into `window.fetch` and `XMLHttpRequest.prototype.send` to capture exact outgoing batch sizes (`count=...`).
+- **Response Validation**: Credits likes only upon verified HTTP 200 responses with `status_code === 0`.
+- **Bounded Delivery Metric**: Cleanly bounds the confirmation rate display between `0.0%` and `100.0%` while preserving 100% of real likes in cumulative statistics.
 
 ### 📊 Deep Analytics & Export
 - **4 Key Performance Indicators (KPIs)**: Total Verified Likes, Total Taps Dispatched, Total Stream Watch Time, and Global Confirmed Delivery Rate.
 - **Top Creators Leaderboard**: Creators ranked by verified likes delivered with session counts, delivery accuracy, and last-active timestamps.
-- **14-Day Activity Bar Chart**: Continuous daily activity chart visualizing likes sent and watch time trends.
-- **Stream Sessions Lifecycle**: Automatically records when streamers go live, likes sent, and when they go offline.
+- **14-Day Activity Bar Chart**: Visualizes daily likes delivered and watch time trends.
+- **Stream Sessions Lifecycle**: Automatically records when streamers go live, likes delivered, and when they go offline.
 - **📥 CSV Data Export**: One-click download of full session history and raw analytics logs.
 
 ### ☁️ Multi-Device Cloud Synchronization
-- Keep all favorites, toggles (❤️), mute settings, and session statistics synchronized across **macOS**, **Windows gaming PCs**, and **Linux servers**:
+- Keep favorites, toggles (❤️), mute settings, and session statistics synchronized across **macOS**, **Windows gaming PCs**, and **Linux servers**:
   - **📁 Shared Folder / Cloud Drive**: Point to any folder inside your **Dropbox**, **Google Drive**, **OneDrive**, or **Syncthing** directory. Zero setup required!
   - **🌐 WebDAV**: Connect to **Nextcloud**, **ownCloud**, or **Fastmail**.
   - **⚡ REST API Server**: Self-hosted or centralized sync server with API key authorization.
-- **🍪 Cross-Device TikTok Session & Cookie Sync**: Automatically synchronizes your authenticated TikTok login cookies (`sessionid`) so that background Linux servers like and tap directly under your personal TikTok account.
-- Conflict-free Last-Write-Wins (LWW) resolution with deletion tombstones prevents race conditions.
+- **🍪 Cross-Device TikTok Session & Cookie Sync**: Synchronizes authenticated TikTok login cookies (`sessionid`) so headless Linux servers like under your personal account.
+- **Conflict-Free Merging**: Last-Write-Wins (LWW) resolution with deletion tombstones prevents deleted creators from reappearing.
 
 ### 🖥️ Native Browser Engine Architecture
 - **macOS**: Native **Apple WebKit (`WKWebView`)** via `pyobjc-framework-WebKit` with hardware-accelerated H.264/HEVC/AAC video decoding and minimal CPU/memory footprint.
 - **Windows**: **Microsoft Edge WebView2 (`qtwebview2`)** with low-memory Chromium flags.
 - **Linux**: **`PyQt6-WebEngine`** with DocumentCreation codec shims for seamless TikTok Live player mounting.
-- **Zero-Leak In-Page Engine**: Native JavaScript tapping loop executes directly in the DOM, eliminating IPC queue congestion and V8 heap growth (preventing Error 36 crashes). Floating heart animations are pruned automatically every 3 seconds.
+- **Zero-Leak In-Page Engine**: Native JavaScript tapping loop executes directly in the DOM, eliminating IPC queue congestion and V8 heap growth. Floating heart animations are pruned automatically every 3 seconds.
 
 ---
 
 ## 💻 Installation & Quick Start
 
-### 1. Clone the Repository
+### Option A: Download Pre-Compiled Standalone Binaries (Recommended)
+
+Grab the latest standalone package from the **[GitHub Releases](https://github.com/Crypto90/TikTok-Live-Auto-Liker-Tapper/releases)** page:
+
+- **Windows**: `TikTokLiveAutoLiker.exe` (Ready to run, no installation required)
+- **macOS**: `TikTokLiveAutoLiker-macOS.zip` (Includes `TikTokLiveAutoLiker.app` + `Open_TikTokLiveAutoLiker.command` launcher to bypass Gatekeeper)
+- **Linux**: `TikTokLiveAutoLiker-Linux.tar.gz` (Standalone 64-bit binary)
+
+> [!TIP]
+> **macOS Users**: Because the app is ad-hoc signed, macOS Gatekeeper may show a quarantine prompt on first open. Simply double-click the included **`Open_TikTokLiveAutoLiker.command`** launcher to strip the quarantine attribute and launch immediately.
+
+---
+
+### Option B: Run from Source
+
+#### 1. Clone the Repository
 ```bash
 git clone https://github.com/Crypto90/TikTok-Live-Auto-Liker-Tapper.git
 cd TikTok-Live-Auto-Liker-Tapper
 ```
 
-### 2. Install Dependencies
+#### 2. Install Dependencies
 ```bash
+# macOS / Linux:
 pip install -r requirements.txt
+
+# Windows (PowerShell):
+python -m pip install -r requirements.txt
 ```
 *Platform-specific web engine bindings (WebKit on macOS, WebView2 on Windows) are resolved automatically.*
 
-### 3. Run the Desktop Application
+#### 3. Launch the Application
 ```bash
 python tiktok_live_auto_liker_tapper.py
 ```
 
 ---
 
-## 🖥️ Headless Linux Server Mode
+## 🖥️ Headless Linux Server Mode (24/7 Automation)
 
-For 24/7 unmonitored liking on a home server, Raspberry Pi, or cloud VPS:
+For unmonitored liking on a home server, Raspberry Pi, or cloud VPS without a physical display:
 
-### Run with Virtual Framebuffer (Xvfb)
+### 1. Run with Virtual Framebuffer (Xvfb)
 ```bash
 # Direct runner:
 xvfb-run -a python headless_runner.py --port 8080
@@ -148,19 +203,19 @@ xvfb-run -a python headless_runner.py --port 8080
 xvfb-run -a python tiktok_live_auto_liker_tapper.py --headless --port 8080
 ```
 
-### Access the Web Dashboard
+### 2. Access the Web Dashboard
 Open your browser and navigate to:
 ```
 http://<your-server-ip>:8080
 ```
 
-### Deploy with Docker
+### 3. Deploy with Docker
 ```bash
 cd server
 docker compose up -d
 ```
 
-### Deploy with Systemd (Ubuntu / Debian / CentOS)
+### 4. Deploy with Systemd (Ubuntu / Debian / CentOS)
 ```bash
 sudo cp server/tiktok-autoliker.service /etc/systemd/system/
 sudo systemctl daemon-reload
@@ -169,7 +224,7 @@ sudo systemctl enable --now tiktok-autoliker
 
 ---
 
-## ☁️ Multi-Device Sync Setup
+## ☁️ Multi-Device Cloud Sync Setup
 
 1. In the desktop sidebar under **Data Management**, click **☁️ Cloud Sync** (or visit **Settings & Sync** in the Web Dashboard).
 2. Check **Enable Automatic Cloud Sync**.
@@ -182,24 +237,37 @@ sudo systemctl enable --now tiktok-autoliker
 
 ---
 
-## 🔨 Building Standalone Executables (.app / .exe / binary)
+## 🔔 Discord & Telegram Notifications Setup
 
-A unified packaging script is included:
+1. In the desktop sidebar under **Data Management**, click **🔔 Alerts & Webhooks**.
+2. **Desktop Toasts**: Check **Enable Native OS Notifications** to receive desktop banners.
+3. **Discord Integration**: Check **Enable Discord Channel Alerts** and paste your Discord Webhook URL.
+4. **Telegram Integration**: Check **Enable Telegram Bot Alerts**, enter your Bot Token and Chat ID.
+5. Click **Test Desktop Notification**, **Test Discord**, or **Test Telegram** to confirm delivery.
+6. Click **Save & Close**.
+
+---
+
+## 🔨 Building Standalone Executables (`build.py`)
+
+The repository includes a unified cross-platform build script:
 
 ```bash
 python build.py
 ```
 
-### Output Artifacts:
-- **macOS**: `dist/TikTokLiveAutoLiker.app` + `dist/Open_TikTokLiveAutoLiker.command` (Launcher that strips Gatekeeper quarantine on first run)
-- **Windows**: `dist/TikTokLiveAutoLiker.exe` (Standalone executable)
-- **Linux**: `dist/TikTokLiveAutoLiker` (Standalone 64-bit binary)
+### Artifacts Produced:
+| Host OS | Output File(s) | Description |
+| :--- | :--- | :--- |
+| **macOS** | `dist/TikTokLiveAutoLiker.app` + `dist/Open_TikTokLiveAutoLiker.command` | Universal/native macOS bundle with Gatekeeper launcher |
+| **Windows** | `dist\TikTokLiveAutoLiker.exe` | Single-file Windows executable |
+| **Linux** | `dist/TikTokLiveAutoLiker` | Standalone 64-bit Linux binary |
 
 ---
 
 ## 💖 Support Development
 
-If you find this project useful, you can support development via Ko-fi:
+If you enjoy this project and find it helpful, you can support ongoing development via Ko-fi:
 
 [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/K3K314GUP?ref=tiktok_live_auto_liker_readme)
 
@@ -207,4 +275,4 @@ If you find this project useful, you can support development via Ko-fi:
 
 ## ⚖️ Disclaimer
 
-This tool is for educational and research purposes only. Automated interaction with TikTok may violate their Terms of Service. Use responsibly.
+This application is developed strictly for educational, testing, and research purposes. Automated interaction with TikTok may violate their Terms of Service. Please use responsibly and respect creator communities.
