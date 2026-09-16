@@ -34,6 +34,28 @@ if sys.platform == "win32":
     except ImportError:
         HAS_WIN_WEBVIEW2 = False
 
+# Keep background tabs and minimized windows tapping at full speed. Measured in WebView2 without
+# these flags, a 200ms timer ran about once per second in a hidden tab or minimized window, and
+# about once per minute after the tab had been hidden for 5 minutes.
+BACKGROUND_THROTTLING_FLAGS = (
+    "--disable-background-timer-throttling "
+    "--disable-renderer-backgrounding "
+    "--disable-backgrounding-occluded-windows "
+    "--disable-features=IntensiveWakeUpThrottling"
+)
+
+
+def _append_browser_flags(env_var: str, flags: str):
+    current = os.environ.get(env_var, "")
+    if flags not in current:
+        os.environ[env_var] = f"{current} {flags}".strip()
+
+
+# Both are read when the first browser view is created, so they must be set at import time
+if sys.platform == "win32":
+    _append_browser_flags("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", BACKGROUND_THROTTLING_FLAGS)
+_append_browser_flags("QTWEBENGINE_CHROMIUM_FLAGS", BACKGROUND_THROTTLING_FLAGS)
+
 try:
     from PyQt6.QtWebEngineWidgets import QWebEngineView
     from PyQt6.QtWebEngineCore import QWebEngineScript, QWebEngineProfile, QWebEnginePage
@@ -139,20 +161,27 @@ PIP_PLAYER_RESTORE_JS = """(function() {
 })();"""
 
 
-TAPPER_IN_PAGE_SCRIPT = """
+TAPPER_IN_PAGE_SCRIPT = r"""
 (function() {
     if (window.__tiktokAutoTapperInstalled) {
         return;
     }
     window.__tiktokAutoTapperInstalled = true;
 
+    // TikTok's 'l' shortcut runs through a 200ms lodash throttle: taps closer than this are merged
+    var MIN_TAP_INTERVAL = 200;
+    // TikTok sends one /webcast/room/like/ request per 15 taps (or after 500ms idle) carrying "count"
+    var LIKE_BATCH_SIZE = 15;
+    // status_code TikTok returns when it rate-limits likes; it drops every tap until like_blocked_until_ms
+    var FREQUENCY_BLOCKED = 4021043;
+
     var state = {
         enabled: true,
-        baseDelay: 165,
-        randomization: 35,
+        baseDelay: 200,
+        randomization: 5,
         adaptive: true,
-        minDelay: 130,
-        maxDelay: 260,
+        minDelay: MIN_TAP_INTERVAL,
+        maxDelay: 300,
         timerId: null,
         cleanupTimerId: null
     };
@@ -163,94 +192,141 @@ TAPPER_IN_PAGE_SCRIPT = """
         failed: 0,
         roomLikes: 0,
         lastAckTime: 0,
+        dispatchedAtLastAck: 0,
+        blockedUntil: 0,
+        blockCount: 0,
+        blockedMsTotal: 0,
+        lastRejectTime: 0,
+        lastRejectStatus: null,
         startTime: Date.now()
     };
 
     var adaptWindow = {
         dispatched: 0,
         verified: 0,
+        failed: 0,
         lastCheckTime: Date.now()
     };
+
+    var lastAck = { url: '', time: 0, count: 0 };
+    function creditVerified(u, count, data) {
+        var now = Date.now();
+        // Prevent duplicate crediting if both fetch & XHR intercept the same call within 80ms
+        if (u && u === lastAck.url && (now - lastAck.time) < 80 && count === lastAck.count) {
+            return;
+        }
+        lastAck.url = u || '';
+        lastAck.time = now;
+        lastAck.count = count;
+
+        stats.verified += count;
+        stats.lastAckTime = now;
+        stats.dispatchedAtLastAck = stats.dispatched;
+        if (data && data.data && typeof data.data.like_count === 'number') {
+            stats.roomLikes = data.data.like_count;
+        }
+    }
+
+    function blockedRemaining() {
+        return Math.max(0, stats.blockedUntil - Date.now());
+    }
+
+    function markRejected(count, reason) {
+        stats.failed += count;
+        stats.lastRejectTime = Date.now();
+        stats.lastRejectStatus = reason;
+    }
+
+    function handleLikeResponse(u, count, data) {
+        var status = (data && typeof data.status_code === 'number') ? data.status_code : 0;
+        if (status === 0) {
+            creditVerified(u, count, data);
+            return;
+        }
+        if (status === FREQUENCY_BLOCKED) {
+            if (blockedRemaining() === 0) stats.blockCount++;
+            var wait = Number(data.extra && data.extra.like_blocked_until_ms) - Date.now();
+            if (!(wait > 0)) wait = 5000;
+            var until = Date.now() + Math.min(30 * 60 * 1000, wait);
+            if (until > stats.blockedUntil) {
+                stats.blockedMsTotal += until - Math.max(stats.blockedUntil, Date.now());
+                stats.blockedUntil = until;
+            }
+        }
+        markRejected(count, status);
+    }
+
+    // Whether likes are currently counting on TikTok's side ('ok') or why not
+    function deliveryState() {
+        if (blockedRemaining() > 0) return 'limited';
+        if (stats.lastRejectTime > stats.lastAckTime && stats.lastRejectStatus !== FREQUENCY_BLOCKED) return 'rejected';
+        // A batch is sent every LIKE_BATCH_SIZE taps, so two missing confirmations means nothing is landing
+        if (stats.dispatched - stats.dispatchedAtLastAck > 2 * LIKE_BATCH_SIZE) return 'unconfirmed';
+        return 'ok';
+    }
+
+    function requestUrl(input) {
+        if (!input) return '';
+        if (typeof input === 'string') return input;
+        return String(input.url || input.href || input);
+    }
+
+    function isActualLikeEndpoint(u) {
+        // Match the path only: telemetry beacons also mention "like" and would double-count
+        var path = u.split('?')[0].split('#')[0];
+        return /\/webcast\/room\/like\/?$/i.test(path);
+    }
+
+    function likeCount(u, body) {
+        var m = u.match(/[?&](?:count|like_count)=(\d+)/i);
+        if (!m && typeof body === 'string') {
+            // TikTok posts JSON: {"to_uid":..,"count":N,"room_id":..,"enter_from":"live"}
+            m = body.match(/"count"\s*:\s*"?(\d+)/) || body.match(/(?:^|&)count=(\d+)/);
+        } else if (!m && body && typeof body.get === 'function') {
+            var v = body.get('count');
+            if (v != null) m = [null, String(v)];
+        }
+        var n = m ? parseInt(m[1], 10) : 1;
+        return n > 0 ? n : 1;
+    }
 
     // --- Transparent Network Sniffer & Server Like Verifier ---
     try {
         if (!window.__tiktokNetworkHooked) {
             window.__tiktokNetworkHooked = true;
 
-            // 1. Hook window.fetch
+            // 1. Hook window.fetch (TikTok's webcast API client resolves window.fetch per call)
             if (typeof window.fetch === 'function') {
                 var origFetch = window.fetch;
-                window.fetch = async function() {
-                    var args = Array.prototype.slice.call(arguments);
-                    var url = '';
-                    try {
-                        if (typeof args[0] === 'string') url = args[0];
-                        else if (args[0] && args[0].url) url = args[0].url;
-                    } catch(e) {}
-
-                    var isLikeReq = /webcast\/room\/(like|digg)/i.test(url) || /webcast\/.*like/i.test(url);
-                    var batchCount = 1;
-
-                    if (isLikeReq) {
-                        try {
-                            var countMatch = url.match(/[?&]count=(\d+)/i);
-                            if (countMatch && countMatch[1]) {
-                                batchCount = parseInt(countMatch[1], 10) || 1;
-                            } else if (args[1] && args[1].body) {
-                                var b = args[1].body;
-                                if (typeof b === 'string') {
-                                    var bodyMatch = b.match(/count=(\d+)/i) || b.match(/"count"\\s*:\\s*(\\d+)/i);
-                                    if (bodyMatch && bodyMatch[1]) {
-                                        batchCount = parseInt(bodyMatch[1], 10) || 1;
-                                    }
-                                } else if (typeof URLSearchParams !== 'undefined' && b instanceof URLSearchParams) {
-                                    if (b.has('count')) batchCount = parseInt(b.get('count'), 10) || 1;
-                                } else if (typeof FormData !== 'undefined' && b instanceof FormData) {
-                                    if (b.has('count')) batchCount = parseInt(b.get('count'), 10) || 1;
-                                } else if (typeof b === 'object' && b && b.count) {
-                                    batchCount = parseInt(b.count, 10) || 1;
-                                }
-                            }
-                        } catch(e) {}
+                window.fetch = async function(input, init) {
+                    var url = requestUrl(input);
+                    if (!isActualLikeEndpoint(url)) {
+                        return origFetch.apply(this, arguments);
                     }
+
+                    var body = init && init.body;
+                    if (body == null && typeof Request !== 'undefined' && input instanceof Request) {
+                        try { body = await input.clone().text(); } catch(e) {}
+                    }
+                    var count = likeCount(url, body);
 
                     var response;
                     try {
-                        response = await origFetch.apply(this, args);
+                        response = await origFetch.apply(this, arguments);
                     } catch(err) {
-                        if (isLikeReq) stats.failed++;
+                        markRejected(count, 'network error');
                         throw err;
                     }
 
-                    if (isLikeReq && response) {
-                        try {
-                            if (response.ok) {
-                                var clone = response.clone();
-                                clone.json().then(function(data) {
-                                    if (data && data.status_code === 0) {
-                                        stats.verified += batchCount;
-                                        stats.lastAckTime = Date.now();
-                                        if (data.data && typeof data.data.like_count === 'number') {
-                                            stats.roomLikes = data.data.like_count;
-                                        }
-                                    } else if (!data || data.status_code === undefined) {
-                                        stats.verified += batchCount;
-                                        stats.lastAckTime = Date.now();
-                                    } else {
-                                        stats.failed++;
-                                    }
-                                }).catch(function() {
-                                    if (response.ok) {
-                                        stats.verified += batchCount;
-                                        stats.lastAckTime = Date.now();
-                                    }
-                                });
-                            } else {
-                                stats.failed++;
-                            }
-                        } catch(e) {}
+                    if (!response.ok) {
+                        markRejected(count, 'HTTP ' + response.status);
+                    } else {
+                        response.clone().json().then(function(data) {
+                            handleLikeResponse(url, count, data);
+                        }, function() {
+                            handleLikeResponse(url, count, null);
+                        });
                     }
-
                     return response;
                 };
             }
@@ -261,61 +337,29 @@ TAPPER_IN_PAGE_SCRIPT = """
                 var origSend = XMLHttpRequest.prototype.send;
 
                 XMLHttpRequest.prototype.open = function(method, url) {
-                    this.__ttUrl = url || '';
-                    this.__ttMethod = method || '';
+                    this.__ttUrl = url;
                     return origOpen.apply(this, arguments);
                 };
 
                 XMLHttpRequest.prototype.send = function(body) {
                     var xhr = this;
-                    var url = xhr.__ttUrl || '';
-                    var isLikeReq = /webcast\/room\/(like|digg)/i.test(url) || /webcast\/.*like/i.test(url);
+                    var url = requestUrl(xhr.__ttUrl);
 
-                    if (isLikeReq) {
-                        var batchCount = 1;
-                        try {
-                            var countMatch = url.match(/[?&]count=(\d+)/i);
-                            if (countMatch && countMatch[1]) {
-                                batchCount = parseInt(countMatch[1], 10) || 1;
-                            } else if (body) {
-                                if (typeof body === 'string') {
-                                    var bodyMatch = body.match(/count=(\d+)/i) || body.match(/"count"\\s*:\\s*(\\d+)/i);
-                                    if (bodyMatch && bodyMatch[1]) {
-                                        batchCount = parseInt(bodyMatch[1], 10) || 1;
-                                    }
-                                } else if (typeof URLSearchParams !== 'undefined' && body instanceof URLSearchParams) {
-                                    if (body.has('count')) batchCount = parseInt(body.get('count'), 10) || 1;
-                                } else if (typeof FormData !== 'undefined' && body instanceof FormData) {
-                                    if (body.has('count')) batchCount = parseInt(body.get('count'), 10) || 1;
-                                }
-                            }
-                        } catch(e) {}
-
+                    if (isActualLikeEndpoint(url)) {
+                        var count = likeCount(url, body);
                         xhr.addEventListener('load', function() {
+                            if (xhr.status < 200 || xhr.status >= 300) {
+                                markRejected(count, 'HTTP ' + xhr.status);
+                                return;
+                            }
+                            var data = null;
                             try {
-                                if (xhr.status >= 200 && xhr.status < 300) {
-                                    var data = null;
-                                    try { data = JSON.parse(xhr.responseText); } catch(e) {}
-                                    if (data && data.status_code === 0) {
-                                        stats.verified += batchCount;
-                                        stats.lastAckTime = Date.now();
-                                        if (data.data && typeof data.data.like_count === 'number') {
-                                            stats.roomLikes = data.data.like_count;
-                                        }
-                                    } else if (!data) {
-                                        stats.verified += batchCount;
-                                        stats.lastAckTime = Date.now();
-                                    } else {
-                                        stats.failed++;
-                                    }
-                                } else {
-                                    stats.failed++;
-                                }
+                                data = xhr.responseType === 'json' ? xhr.response : JSON.parse(xhr.responseText);
                             } catch(e) {}
+                            handleLikeResponse(url, count, data);
                         });
-
                         xhr.addEventListener('error', function() {
-                            stats.failed++;
+                            markRejected(count, 'network error');
                         });
                     }
 
@@ -326,48 +370,62 @@ TAPPER_IN_PAGE_SCRIPT = """
     } catch(e) {}
 
     function getNextDelay() {
-        return Math.max(50, state.baseDelay + Math.floor(Math.random() * (state.randomization + 1)));
+        return Math.max(MIN_TAP_INTERVAL, state.baseDelay + Math.floor(Math.random() * (state.randomization + 1)));
     }
 
     function checkAdaptiveRate() {
         if (!state.adaptive) return;
         var now = Date.now();
-        var deltaD = stats.dispatched - adaptWindow.dispatched;
-        if (deltaD >= 20 && (now - adaptWindow.lastCheckTime) >= 3500) {
+        // Verified moves in batch-sized steps, so short windows would read as false drops
+        if ((now - adaptWindow.lastCheckTime) >= 15000) {
+            var deltaD = stats.dispatched - adaptWindow.dispatched;
             var deltaV = stats.verified - adaptWindow.verified;
-            var windowRatio = deltaD > 0 ? Math.min(1.0, deltaV / deltaD) : 1.0;
+            var failedDelta = stats.failed - adaptWindow.failed;
+            var ackSilentTime = stats.lastAckTime > 0 ? (now - stats.lastAckTime) : 0;
 
-            if (stats.lastAckTime > 0) {
-                if (windowRatio < 0.78) {
-                    // Confirmed rate below 78%: back off by 15ms to honor client/server debounce
-                    state.baseDelay = Math.min(state.maxDelay, state.baseDelay + 15);
-                } else if (windowRatio >= 0.90 && state.baseDelay > state.minDelay) {
-                    // Confirmed rate stellar (>=90%): probe faster by 5ms
-                    state.baseDelay = Math.max(state.minDelay, state.baseDelay - 5);
+            if (failedDelta > 0) {
+                // Server rejected or errored: back off
+                state.baseDelay = Math.min(state.maxDelay, state.baseDelay + 20);
+            } else if (ackSilentTime > 8000 && deltaD > LIKE_BATCH_SIZE) {
+                // Dispatched without any server ACK for 8s: back off
+                state.baseDelay = Math.min(state.maxDelay, state.baseDelay + 15);
+            } else if (deltaD >= 2 * LIKE_BATCH_SIZE && stats.lastAckTime > 0) {
+                // Allow for one batch still waiting to flush when the window closes
+                var ratio = (deltaV + LIKE_BATCH_SIZE) / deltaD;
+                if (ratio < 0.85) {
+                    state.baseDelay = Math.min(state.maxDelay, state.baseDelay + 10);
+                } else if (ratio >= 0.95 && state.baseDelay > state.minDelay) {
+                    state.baseDelay = Math.max(state.minDelay, state.baseDelay - 2);
                 }
             }
+
             adaptWindow.dispatched = stats.dispatched;
             adaptWindow.verified = stats.verified;
+            adaptWindow.failed = stats.failed;
             adaptWindow.lastCheckTime = now;
         }
     }
 
     function triggerSingleTap() {
-        if (!state.enabled) return;
+        if (!state.enabled || blockedRemaining() > 0) return;
         stats.dispatched++;
 
         // Dispatch clean 'L' keyboard event (TikTok official desktop like hotkey)
         try {
             var active = document.activeElement;
             var isInput = active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable);
-            var target = (!isInput && active) ? active : (document.body || document.documentElement || document);
+            
+            var player = document.querySelector('[data-e2e="live-player"], .live-player-core, video, [class*="PlayerContainer"], [class*="player-container"]');
+            var target = (!isInput && player) ? player : ((!isInput && active) ? active : (document.body || document.documentElement || document));
 
             var kd = new KeyboardEvent('keydown', {
-                key: 'l', code: 'KeyL', keyCode: 76, which: 76, bubbles: true, cancelable: true
+                key: 'l', code: 'KeyL', keyCode: 76, which: 76, bubbles: true, cancelable: true, view: window
             });
             var ku = new KeyboardEvent('keyup', {
-                key: 'l', code: 'KeyL', keyCode: 76, which: 76, bubbles: true, cancelable: true
+                key: 'l', code: 'KeyL', keyCode: 76, which: 76, bubbles: true, cancelable: true, view: window
             });
+            // Dispatch once: it bubbles to TikTok's window-level listener. A second dispatch on
+            // document hits the same throttle again and fires its trailing edge as an extra like.
             target.dispatchEvent(kd);
             target.dispatchEvent(ku);
         } catch(e) {
@@ -388,6 +446,12 @@ TAPPER_IN_PAGE_SCRIPT = """
 
     function triggerTap() {
         if (!state.enabled) return;
+        var blocked = blockedRemaining();
+        if (blocked > 0) {
+            // TikTok discards taps until its like-frequency block expires
+            state.timerId = setTimeout(triggerTap, blocked + 250);
+            return;
+        }
         triggerSingleTap();
 
         // Schedule next tap with natural jitter
@@ -438,7 +502,10 @@ TAPPER_IN_PAGE_SCRIPT = """
     }
 
     window.__tiktokStartTapper = function(base, rand, enabled, adaptive) {
-        if (typeof base === 'number') state.baseDelay = base;
+        if (typeof base === 'number' && base > 0) {
+            state.baseDelay = Math.max(MIN_TAP_INTERVAL, base);
+            state.maxDelay = Math.max(MIN_TAP_INTERVAL + 100, Math.floor(state.baseDelay * 1.5));
+        }
         if (typeof rand === 'number') state.randomization = rand;
         if (enabled !== undefined) state.enabled = !!enabled;
         if (adaptive !== undefined) state.adaptive = !!adaptive;
@@ -454,7 +521,10 @@ TAPPER_IN_PAGE_SCRIPT = """
     };
 
     window.__tiktokSetTapperSpeed = function(base, rand, adaptive) {
-        if (typeof base === 'number') state.baseDelay = base;
+        if (typeof base === 'number' && base > 0) {
+            state.baseDelay = Math.max(MIN_TAP_INTERVAL, base);
+            state.maxDelay = Math.max(MIN_TAP_INTERVAL + 100, Math.floor(state.baseDelay * 1.5));
+        }
         if (typeof rand === 'number') state.randomization = rand;
         if (adaptive !== undefined) state.adaptive = !!adaptive;
     };
@@ -483,9 +553,11 @@ TAPPER_IN_PAGE_SCRIPT = """
 
     window.__tiktokTapperBurst = function(count) {
         if (!state.enabled) return;
-        var n = Math.min(15, Math.max(1, count || 1));
-        var spacing = Math.max(160, state.baseDelay);
-        for (var i = 0; i < n; i++) {
+        var n = Math.min(5, Math.max(1, count || 1));
+        var spacing = Math.max(MIN_TAP_INTERVAL + 5, state.baseDelay);
+        // First tap runs now: called from the host app, it works even while this page's timers are throttled
+        triggerSingleTap();
+        for (var i = 1; i < n; i++) {
             setTimeout(function() {
                 if (state.enabled) triggerSingleTap();
             }, i * spacing);
@@ -513,6 +585,12 @@ TAPPER_IN_PAGE_SCRIPT = """
             lastAckTime: stats.lastAckTime,
             uptimeSeconds: Math.round((Date.now() - stats.startTime) / 1000),
             currentDelay: state.baseDelay,
+            blockedRemainingMs: blockedRemaining(),
+            blockCount: stats.blockCount,
+            limitedSeconds: Math.round(stats.blockedMsTotal / 1000),
+            delivery: deliveryState(),
+            unconfirmedTaps: stats.dispatched - stats.dispatchedAtLastAck,
+            lastRejectStatus: stats.lastRejectStatus,
             adaptive: state.adaptive
         };
     };
@@ -524,6 +602,20 @@ TAPPER_IN_PAGE_SCRIPT = """
 # macOS Native WebKit (WKWebView) Backend
 # ---------------------------------------------------------------------------
 if HAS_MAC_WEBKIT:
+    _APP_NAP_ACTIVITY = None
+
+    def _prevent_app_nap():
+        """App Nap slows timers of apps in the background; keep the tapper running while windows are hidden."""
+        global _APP_NAP_ACTIVITY
+        if _APP_NAP_ACTIVITY is not None:
+            return
+        try:
+            info = AppKit.NSProcessInfo.processInfo()
+            options = AppKit.NSActivityUserInitiatedAllowingIdleSystemSleep
+            _APP_NAP_ACTIVITY = info.beginActivityWithOptions_reason_(options, "Tapping live streams")
+        except Exception:
+            _APP_NAP_ACTIVITY = False
+
     def _objc_to_py(obj):
         """Recursively convert PyObjC collections to native Python dicts, lists, and primitives."""
         if obj is None:
@@ -619,6 +711,14 @@ if HAS_MAC_WEBKIT:
             if hasattr(pref, '_setMediaSourceEnabled_'):
                 try: pref._setMediaSourceEnabled_(True)
                 except Exception: pass
+            # Hidden or occluded pages otherwise get their timers throttled, which stalls tapping
+            if hasattr(pref, '_setHiddenPageDOMTimerThrottlingEnabled_'):
+                try: pref._setHiddenPageDOMTimerThrottlingEnabled_(False)
+                except Exception: pass
+            if hasattr(pref, '_setPageVisibilityBasedProcessSuppressionEnabled_'):
+                try: pref._setPageVisibilityBasedProcessSuppressionEnabled_(False)
+                except Exception: pass
+            _prevent_app_nap()
 
             # Persistent website data store
             if hasattr(WebKit, 'WKWebsiteDataStore'):
@@ -784,7 +884,7 @@ if HAS_MAC_WEBKIT:
             """Isolate live video player to fill 100% of viewport and hide all website chrome/sidebars."""
             self.evaluate_js(PIP_PLAYER_ISOLATE_JS if enabled else PIP_PLAYER_RESTORE_JS)
 
-        def inject_in_page_tapper(self, base_ms=165, rand_ms=35, enabled=True, adaptive=True):
+        def inject_in_page_tapper(self, base_ms=200, rand_ms=5, enabled=True, adaptive=True):
             """Injects the tapping engine and starts the loop natively inside the browser."""
             setup_call = f"window.__tiktokStartTapper({base_ms}, {rand_ms}, {'true' if enabled else 'false'}, {'true' if adaptive else 'false'});"
             full_js = TAPPER_IN_PAGE_SCRIPT + "\n" + setup_call
@@ -1029,7 +1129,7 @@ if HAS_WIN_WEBVIEW2:
             """Isolate live video player to fill 100% of viewport and hide all website chrome/sidebars."""
             self.evaluate_js(PIP_PLAYER_ISOLATE_JS if enabled else PIP_PLAYER_RESTORE_JS)
 
-        def inject_in_page_tapper(self, base_ms=165, rand_ms=35, enabled=True, adaptive=True):
+        def inject_in_page_tapper(self, base_ms=200, rand_ms=5, enabled=True, adaptive=True):
             setup_call = f"window.__tiktokStartTapper({base_ms}, {rand_ms}, {'true' if enabled else 'false'}, {'true' if adaptive else 'false'});"
             full_js = TAPPER_IN_PAGE_SCRIPT + "\n" + setup_call
             self.evaluate_js(full_js)
@@ -1224,7 +1324,7 @@ if HAS_QT_WEBENGINE:
             """Isolate live video player to fill 100% of viewport and hide all website chrome/sidebars."""
             self.evaluate_js(PIP_PLAYER_ISOLATE_JS if enabled else PIP_PLAYER_RESTORE_JS)
 
-        def inject_in_page_tapper(self, base_ms=165, rand_ms=35, enabled=True, adaptive=True):
+        def inject_in_page_tapper(self, base_ms=200, rand_ms=5, enabled=True, adaptive=True):
             setup_call = f"window.__tiktokStartTapper({base_ms}, {rand_ms}, {'true' if enabled else 'false'}, {'true' if adaptive else 'false'});"
             full_js = TAPPER_IN_PAGE_SCRIPT + "\n" + setup_call
             self.evaluate_js(full_js)
@@ -1396,7 +1496,7 @@ class UniversalWebView(QWidget):
         if hasattr(self._engine, "set_pip_mode"):
             self._engine.set_pip_mode(enabled)
 
-    def inject_in_page_tapper(self, base_ms=165, rand_ms=35, enabled=True, adaptive=True):
+    def inject_in_page_tapper(self, base_ms=200, rand_ms=5, enabled=True, adaptive=True):
         self._engine.inject_in_page_tapper(base_ms, rand_ms, enabled, adaptive)
 
     def set_tapper_rate(self, base_ms, rand_ms, adaptive=None):

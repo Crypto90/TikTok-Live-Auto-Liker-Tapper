@@ -28,7 +28,7 @@ from PyQt6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkRepl
 
 from webview_engine import UniversalWebView, get_best_engine_class
 from sync_manager import SyncManager, FolderSyncBackend, WebDAVSyncBackend, RestSyncBackend
-from stats_manager import StatsManager
+from stats_manager import StatsManager, TapperStatsProcessor, format_limits
 
 
 def _qt_message_handler(mode, context, message):
@@ -346,18 +346,18 @@ class SettingsManager:
     @staticmethod
     def load_settings():
         default_settings = {
-            "like_delay_ms": 165,
-            "randomization_ms": 35,
+            "like_delay_ms": 200,
+            "randomization_ms": 5,
             "adaptive_rate": True
         }
         if os.path.exists(SETTINGS_FILE):
             try:
                 with open(SETTINGS_FILE, 'r') as f:
                     settings = json.load(f)
-                    # Migrate legacy defaults (100ms/50ms) to optimal 90%+ confirmed sweet spot (165ms/35ms)
-                    if settings.get("like_delay_ms") in (100, 50) and settings.get("randomization_ms") == 50:
-                        settings["like_delay_ms"] = 165
-                        settings["randomization_ms"] = 35
+                    # TikTok throttles the like shortcut to one like per 200ms; shorter delays only waste taps
+                    if settings.get("like_delay_ms", 200) < 200:
+                        settings["like_delay_ms"] = 200
+                        settings["randomization_ms"] = 5
                     if "adaptive_rate" not in settings:
                         settings["adaptive_rate"] = True
                     default_settings.update(settings)
@@ -645,8 +645,8 @@ class PipHudOverlay(QFrame):
         self.btn_dock.clicked.connect(self.pip_window._request_dock_back)
         layout.addWidget(self.btn_dock)
 
-    def update_likes(self, count):
-        self.lbl_likes.setText(f"❤️ {count:,}")
+    def update_likes(self, count, icon=""):
+        self.lbl_likes.setText(f"❤️ {count:,} {icon}".rstrip())
 
 
 class PipWindow(QDialog):
@@ -784,9 +784,9 @@ class PipWindow(QDialog):
         if hasattr(self.live_tab, 'webview'):
             self.live_tab.webview.set_pip_mode(True)
 
-    def update_likes(self, verified_likes):
-        self.hud.update_likes(verified_likes)
-        self.mini_like_badge.setText(f"❤️ {verified_likes:,}")
+    def update_likes(self, verified_likes, icon=""):
+        self.hud.update_likes(verified_likes, icon)
+        self.mini_like_badge.setText(f"❤️ {verified_likes:,} {icon}".rstrip())
         self.mini_like_badge.adjustSize()
         if self.hud.isHidden():
             self.mini_like_badge.show()
@@ -943,13 +943,19 @@ class GridStreamCard(QFrame):
         if hasattr(self.live_tab, 'set_volume'):
             self.live_tab.set_volume(v)
 
-    def update_likes(self, count):
-        self.lbl_likes.setText(f"❤️ {count:,}")
+    def update_likes(self, count, icon="", detail=""):
+        self.lbl_likes.setText(f"❤️ {count:,} {icon}".rstrip())
+        self.lbl_likes.setToolTip(detail)
+
+
+DELIVERY_ICONS = {"limited": "⏸️", "rejected": "⚠️", "unconfirmed": "⚠️"}
+DELIVERY_COLORS = {"ok": "#2ed573", "limited": "#ffa502", "rejected": "#ff4757", "unconfirmed": "#ff4757"}
 
 
 class LiveTab(QWidget):
     stream_ended = pyqtSignal(str, str)
     milestone_reached = pyqtSignal(str, int, int)  # (username, count, duration_seconds)
+    delivery_alert = pyqtSignal(str, str, str, int)  # (username, "not_counting" | "recovered", detail, seconds)
     mute_state_changed = pyqtSignal(str, bool)  # (username, is_muted)
 
     # Recycle threshold: after 60 minutes, reload the stream to clear caches
@@ -968,10 +974,10 @@ class LiveTab(QWidget):
         self._is_background = False
         self._stream_end_detected = False
         self._tab_opened_at = time.time()
-        self._last_stats_tick = time.time()
         self._last_verified = 0
-        self._last_dispatched = 0
         self._live_rate = 0.0
+        self._stats = TapperStatsProcessor()
+        self._delivery_state = "ok"
         self._reached_milestones = set()
 
         # Restore saved volume (0-100), ensuring volume and is_muted start strictly in sync
@@ -1239,59 +1245,34 @@ class LiveTab(QWidget):
             self.webview.get_tapper_stats(self._on_tapper_stats_result)
 
     def _on_tapper_stats_result(self, result_dict):
-        res = result_dict.get('result')
-        if isinstance(res, str):
-            try: res = json.loads(res)
-            except Exception: res = {}
-        if hasattr(res, 'items') and not isinstance(res, dict):
-            res = dict(res)
-        if not isinstance(res, dict):
+        res = TapperStatsProcessor.parse(result_dict)
+        if res is None:
             return
-
-        dispatched = int(res.get('dispatched', 0) or 0)
-        verified = int(res.get('verified', 0) or 0)
-        failed = int(res.get('failed', 0) or 0)
-        room_likes = int(res.get('roomLikes', 0) or 0)
-
-        # Milestone checking
         now = time.time()
+        snap = self._stats.process(res, now, self.tapper_enabled, self.settings, background=self._is_background)
+        verified = snap.verified
+        delivery_icon = DELIVERY_ICONS.get(snap.delivery, "")
+        self._last_verified = verified
+        self._live_rate = snap.live_rate
+
         for m in self.STANDARD_MILESTONES:
             if verified >= m and m not in self._reached_milestones:
                 self._reached_milestones.add(m)
                 self.milestone_reached.emit(self.username, m, int(now - self._tab_opened_at))
+        if snap.alert:
+            self.delivery_alert.emit(self.username, snap.alert, snap.delivery_detail, snap.not_counting_seconds)
 
         # Update PiP or Grid card likes
         if self.pip_window:
-            self.pip_window.update_likes(verified)
+            self.pip_window.update_likes(verified, delivery_icon)
         win = self.window()
         if hasattr(win, 'grid_cards') and self.username in win.grid_cards:
-            win.grid_cards[self.username].update_likes(verified)
+            win.grid_cards[self.username].update_likes(verified, delivery_icon, snap.delivery_detail)
 
-        # Calculate live rate
-        dt = max(0.5, now - self._last_stats_tick)
-        delta_v = max(0, verified - self._last_verified)
-        delta_d = max(0, dispatched - self._last_dispatched)
-        if delta_v > 0:
-            self._live_rate = round(delta_v / dt, 1)
-        elif delta_d > 0:
-            self._live_rate = round(delta_d / dt, 1)
-        else:
-            self._live_rate = 0.0
-
-        if self.tapper_enabled and self._is_background and dt >= 0.8:
-            base = self.settings.get("like_delay_ms", 165)
-            rand = self.settings.get("randomization_ms", 35)
-            avg_delay_ms = max(40, base + (rand // 2))
-            expected = int(round((dt * 1000.0) / avg_delay_ms))
-            needed = max(0, min(10, expected - delta_d))
-            if needed > 0:
-                self.webview.burst_tapper(needed)
-        elif self.tapper_enabled and not self._is_background and delta_d == 0 and dt >= 1.5:
+        if snap.burst_taps:
+            self.webview.burst_tapper(snap.burst_taps)
+        elif snap.wakeup:
             self.webview.wakeup_tapper()
-
-        self._last_stats_tick = now
-        self._last_verified = verified
-        self._last_dispatched = dispatched
 
         # Format session duration
         elapsed = int(now - self._tab_opened_at)
@@ -1301,33 +1282,41 @@ class LiveTab(QWidget):
 
         # Update stats bar labels
         self.lbl_verified.setText(f"❤️ Verified: <b>{verified:,}</b>")
-        self.lbl_rate.setText(f"⚡ <b>{self._live_rate}/s</b>")
+        self.lbl_rate.setText(f"⚡ <b>{snap.live_rate}/s</b>")
         self.lbl_timer.setText(f"⏱️ <b>{time_str}</b>")
 
-        rate_pct = min(100.0, round((verified / max(1, dispatched)) * 100.0, 1)) if dispatched > 0 else 100.0
-        cur_delay = res.get('currentDelay')
-        delay_info = f" ({cur_delay}ms)" if cur_delay else ""
-        self.lbl_confirmed.setText(f"📶 <b>{rate_pct}% Confirmed</b>{delay_info}")
+        if snap.delivery == "ok":
+            delay_info = f" ({snap.current_delay}ms)" if snap.current_delay else ""
+            self.lbl_confirmed.setText(f"📶 <b>{snap.confirmed_pct}% Confirmed</b>{delay_info}")
+        else:
+            self.lbl_confirmed.setText(f"{delivery_icon} <b>{snap.delivery_label}</b> · {snap.confirmed_pct}% Confirmed")
+        self.lbl_confirmed.setToolTip(snap.delivery_detail)
+        if snap.delivery != self._delivery_state:
+            self._delivery_state = snap.delivery
+            self.lbl_confirmed.setStyleSheet(f"color: {DELIVERY_COLORS[snap.delivery]};")
 
         # Update tab text dynamically
         if self.tabs_widget:
             idx = self.tabs_widget.indexOf(self)
             if idx != -1:
-                prefix = "❤️ " if self.tapper_enabled else ""
+                prefix = f"{delivery_icon or '❤️'} " if self.tapper_enabled else ""
                 count_str = f" (❤️ {verified:,})" if verified > 0 else ""
                 self.tabs_widget.setTabText(idx, f"{prefix}LIVE: @{self.username}{count_str}")
 
         # Update StatsManager session
         if self.stats_mgr and self.session_id:
-            self.stats_mgr.record_progress(self.session_id, verified, dispatched, failed, room_likes)
+            self.stats_mgr.record_progress(
+                self.session_id, verified, snap.dispatched, snap.failed, snap.room_likes,
+                limit_count=snap.limit_count, limited_seconds=snap.limited_seconds,
+                like_delay_ms=self.settings.get("like_delay_ms"))
 
     def _on_nav_completed(self, success, url):
         if success:
             self.webview.set_muted(self.is_muted)
             self.webview.set_volume(self.volume / 100.0)
             self.webview.evaluate_js("(function() { var v = document.querySelector('video'); if (v && v.paused) v.play().catch(function(){}); })();")
-            base = self.settings.get("like_delay_ms", 165)
-            rand = self.settings.get("randomization_ms", 35)
+            base = self.settings.get("like_delay_ms", 200)
+            rand = self.settings.get("randomization_ms", 5)
             adaptive = self.settings.get("adaptive_rate", True)
             self.webview.inject_in_page_tapper(base, rand, enabled=self.tapper_enabled, adaptive=adaptive)
 
@@ -1359,8 +1348,8 @@ class LiveTab(QWidget):
 
     def update_settings(self, settings):
         self.settings = settings
-        base = self.settings.get("like_delay_ms", 165)
-        rand = self.settings.get("randomization_ms", 35)
+        base = self.settings.get("like_delay_ms", 200)
+        rand = self.settings.get("randomization_ms", 5)
         adaptive = self.settings.get("adaptive_rate", True)
         self.webview.set_tapper_rate(base, rand, adaptive=adaptive)
 
@@ -1698,8 +1687,8 @@ class AnalyticsDialog(QDialog):
 
         # Tab 2: Sessions History
         self.sessions_table = QTableWidget()
-        self.sessions_table.setColumnCount(6)
-        self.sessions_table.setHorizontalHeaderLabels(["Date & Time", "Streamer", "Duration", "Verified Likes", "Taps Dispatched", "Status"])
+        self.sessions_table.setColumnCount(7)
+        self.sessions_table.setHorizontalHeaderLabels(["Date & Time", "Streamer", "Duration", "Verified Likes", "Taps Dispatched", "TikTok Limits", "Status"])
         self.sessions_table.horizontalHeader().setStretchLastSection(True)
         self.sessions_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self.sessions_table.verticalHeader().setVisible(False)
@@ -1797,8 +1786,12 @@ class AnalyticsDialog(QDialog):
             self.sessions_table.setItem(row, 2, QTableWidgetItem(d_str))
             self.sessions_table.setItem(row, 3, QTableWidgetItem(f"❤️ {s.get('verified_likes', 0):,}"))
             self.sessions_table.setItem(row, 4, QTableWidgetItem(f"{s.get('taps_dispatched', 0):,}"))
+            limits_item = QTableWidgetItem(format_limits(s))
+            if s.get('like_delay_ms'):
+                limits_item.setToolTip(f"Like delay: {s['like_delay_ms']} ms")
+            self.sessions_table.setItem(row, 5, limits_item)
             status_str = "🟢 Active" if s.get('status') == 'active' else s.get('status', 'completed').capitalize()
-            self.sessions_table.setItem(row, 5, QTableWidgetItem(status_str))
+            self.sessions_table.setItem(row, 6, QTableWidgetItem(status_str))
 
     def _export_csv(self):
         if not self.stats_mgr:
@@ -1833,7 +1826,7 @@ class SyncSettingsDialog(QDialog):
         self.sync_manager = sync_manager
         self.settings = settings or {}
         self.setWindowTitle("Cloud & Multi-Device Sync")
-        self.setFixedSize(540, 560)
+        self.setFixedSize(540, 640)
         self.setStyleSheet("""
             QDialog {
                 background-color: #16181f;
@@ -2028,6 +2021,20 @@ class SyncSettingsDialog(QDialog):
         self.sync_cookies_cb.setStyleSheet("color: #e0e0e0; font-size: 8.5pt;")
         layout.addWidget(self.sync_cookies_cb)
 
+        pass_row = QHBoxLayout()
+        pass_lbl = QLabel("Cookie passphrase:")
+        pass_lbl.setStyleSheet("font-size: 8.5pt; color: #aaa;")
+        self.cookie_pass_edit = QLineEdit(sync_cfg.get("cookie_passphrase", ""))
+        self.cookie_pass_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.cookie_pass_edit.setPlaceholderText("Same passphrase on every device")
+        pass_row.addWidget(pass_lbl)
+        pass_row.addWidget(self.cookie_pass_edit)
+        layout.addLayout(pass_row)
+        pass_hint = QLabel("Cookies are encrypted with this passphrase before they are synced. Without a passphrase they are not synced.")
+        pass_hint.setStyleSheet("font-size: 7.5pt; color: #667;")
+        pass_hint.setWordWrap(True)
+        layout.addWidget(pass_hint)
+
         self.status_lbl = QLabel(getattr(self.sync_manager, 'last_sync_status', 'Not synced yet'))
         self.status_lbl.setStyleSheet("color: #8c96a8; font-size: 8pt; padding: 4px;")
         self.status_lbl.setWordWrap(True)
@@ -2117,6 +2124,7 @@ class SyncSettingsDialog(QDialog):
         sync_cfg["rest_api_key"] = self.rest_key_edit.text().strip()
         sync_cfg["auto_sync_interval_s"] = self.interval_combo.currentData()
         sync_cfg["sync_cookies"] = self.sync_cookies_cb.isChecked()
+        sync_cfg["cookie_passphrase"] = self.cookie_pass_edit.text()
         SettingsManager.save_settings(self.settings)
 
         if self.sync_cookies_cb.isChecked() and self.sync_manager:
@@ -2434,6 +2442,27 @@ class WebhookNotifier(QObject):
             )
             self._send_telegram_async(notif_cfg["telegram_token"], notif_cfg["telegram_chat_id"], text)
 
+    def notify_delivery(self, username, kind, detail, seconds=0, settings=None):
+        notif_cfg = (settings or {}).get("notifications", {})
+        if not notif_cfg.get("notify_not_counting", True):
+            return
+        stream_url = f"https://www.tiktok.com/@{username}/live"
+        if kind == "not_counting":
+            title = f"⚠️ Likes not counting: @{username}"
+            text = f"No likes have counted for {max(1, seconds // 60)} min. {detail}"
+            color = 16750848
+        else:
+            title = f"✅ Likes counting again: @{username}"
+            text = "TikTok is confirming likes again."
+            color = 3066993
+
+        if notif_cfg.get("discord_enabled", False) and notif_cfg.get("discord_url"):
+            self._send_discord_async(notif_cfg["discord_url"], title=title, description=text, url=stream_url, color=color)
+
+        if notif_cfg.get("telegram_enabled", False) and notif_cfg.get("telegram_token") and notif_cfg.get("telegram_chat_id"):
+            self._send_telegram_async(notif_cfg["telegram_token"], notif_cfg["telegram_chat_id"],
+                                      f"*{title}*\n\n{text}\n👉 [Open Stream]({stream_url})")
+
     def _send_discord_async(self, webhook_url, title, description, url="", color=16657493, avatar_url="", fields=None):
         def worker():
             try:
@@ -2612,6 +2641,10 @@ class NotificationSettingsDialog(QDialog):
         self.chk_milestones.setChecked(notif.get("notify_milestones", True))
         lay_desktop.addWidget(self.chk_milestones)
 
+        self.chk_not_counting = QCheckBox("Notify when a stream's likes stop counting for 3+ minutes (and when they recover)")
+        self.chk_not_counting.setChecked(notif.get("notify_not_counting", True))
+        lay_desktop.addWidget(self.chk_not_counting)
+
         test_os_btn = QPushButton("Test Desktop Notification")
         test_os_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         test_os_btn.clicked.connect(self._test_os_notification)
@@ -2770,6 +2803,7 @@ class NotificationSettingsDialog(QDialog):
         notif["desktop_toasts"] = self.chk_toasts.isChecked()
         notif["notify_live"] = self.chk_live.isChecked()
         notif["notify_milestones"] = self.chk_milestones.isChecked()
+        notif["notify_not_counting"] = self.chk_not_counting.isChecked()
         notif["discord_enabled"] = self.chk_discord.isChecked()
         notif["discord_url"] = self.input_discord.text().strip()
         notif["telegram_enabled"] = self.chk_telegram.isChecked()
@@ -2880,6 +2914,7 @@ class TikTokAutoLikerApp(QMainWindow):
             tab = LiveTab(username, self.settings, tapper_enabled, is_muted, stats_mgr=self.stats_mgr, tabs_widget=self.tabs)
             tab.stream_ended.connect(self._on_stream_ended_in_tab)
             tab.milestone_reached.connect(self._on_milestone_reached)
+            tab.delivery_alert.connect(self._on_delivery_alert)
             tab.mute_state_changed.connect(self._on_stream_mute_changed)
 
             prefix = "❤️ " if tapper_enabled else ""
@@ -2941,6 +2976,7 @@ class TikTokAutoLikerApp(QMainWindow):
                 tab = LiveTab(username, self.settings, tapper_enabled=True, is_muted=is_muted, stats_mgr=self.stats_mgr, tabs_widget=self.tabs)
                 tab.stream_ended.connect(self._on_stream_ended_in_tab)
                 tab.milestone_reached.connect(self._on_milestone_reached)
+                tab.delivery_alert.connect(self._on_delivery_alert)
                 tab.mute_state_changed.connect(self._on_stream_mute_changed)
                 idx = self.tabs.addTab(tab, f"❤️ LIVE: @{username}")
                 self.tabs.setCurrentIndex(idx)
@@ -3273,8 +3309,8 @@ class TikTokAutoLikerApp(QMainWindow):
 
         # Base Delay
         self.delay_slider = QSlider(Qt.Orientation.Horizontal)
-        self.delay_slider.setRange(50, 500)
-        self.delay_slider.setValue(self.settings.get("like_delay_ms", 165))
+        self.delay_slider.setRange(200, 500)
+        self.delay_slider.setValue(self.settings.get("like_delay_ms", 200))
         self.delay_val_lbl = QLabel(f"{self.delay_slider.value()} ms")
         self.delay_val_lbl.setMinimumWidth(45)
 
@@ -3289,7 +3325,7 @@ class TikTokAutoLikerApp(QMainWindow):
         # Randomization
         self.rand_slider = QSlider(Qt.Orientation.Horizontal)
         self.rand_slider.setRange(0, 100)
-        self.rand_slider.setValue(self.settings.get("randomization_ms", 35))
+        self.rand_slider.setValue(self.settings.get("randomization_ms", 5))
         self.rand_val_lbl = QLabel(f"{self.rand_slider.value()} ms")
         self.rand_val_lbl.setMinimumWidth(45)
 
@@ -3895,8 +3931,8 @@ class TikTokAutoLikerApp(QMainWindow):
             self.sync_mgr.record_local_change()
 
     def reset_settings_to_default(self):
-        self.delay_slider.setValue(165)
-        self.rand_slider.setValue(35)
+        self.delay_slider.setValue(200)
+        self.rand_slider.setValue(5)
         if hasattr(self, 'chk_adaptive'):
             self.chk_adaptive.setChecked(True)
 
@@ -3948,8 +3984,8 @@ class TikTokAutoLikerApp(QMainWindow):
                 for fav in self.favorites:
                     self._add_user_list_item(fav)
                 self._sort_list()
-                self.delay_slider.setValue(self.settings.get("like_delay_ms", 165))
-                self.rand_slider.setValue(self.settings.get("randomization_ms", 35))
+                self.delay_slider.setValue(self.settings.get("like_delay_ms", 200))
+                self.rand_slider.setValue(self.settings.get("randomization_ms", 5))
                 if hasattr(self, 'chk_adaptive'):
                     self.chk_adaptive.setChecked(self.settings.get("adaptive_rate", True))
                 self._update_status_label()
@@ -3985,8 +4021,8 @@ class TikTokAutoLikerApp(QMainWindow):
 
             self.delay_slider.blockSignals(True)
             self.rand_slider.blockSignals(True)
-            self.delay_slider.setValue(self.settings.get("like_delay_ms", 165))
-            self.rand_slider.setValue(self.settings.get("randomization_ms", 35))
+            self.delay_slider.setValue(self.settings.get("like_delay_ms", 200))
+            self.rand_slider.setValue(self.settings.get("randomization_ms", 5))
             if hasattr(self, 'chk_adaptive'):
                 self.chk_adaptive.setChecked(self.settings.get("adaptive_rate", True))
             self.delay_val_lbl.setText(f"{self.delay_slider.value()} ms")
@@ -4219,6 +4255,7 @@ class TikTokAutoLikerApp(QMainWindow):
                 tab = LiveTab(username, self.settings, tapper_enabled, is_muted, stats_mgr=self.stats_mgr, tabs_widget=self.tabs)
                 tab.stream_ended.connect(self._on_stream_ended_in_tab)
                 tab.milestone_reached.connect(self._on_milestone_reached)
+                tab.delivery_alert.connect(self._on_delivery_alert)
                 tab.mute_state_changed.connect(self._on_stream_mute_changed)
 
                 prefix = "❤️ " if tapper_enabled else ""
@@ -4402,6 +4439,16 @@ class TikTokAutoLikerApp(QMainWindow):
         except Exception as e:
             print(f"Error displaying desktop notification: {e}")
 
+    def _on_delivery_alert(self, username: str, kind: str, detail: str, seconds: int):
+        if not self.settings.get("notifications", {}).get("notify_not_counting", True):
+            return
+        if kind == "not_counting":
+            self._notify_desktop("⚠️ Likes not counting", f"@{username}: no likes counted for {max(1, seconds // 60)} min. {detail}")
+        else:
+            self._notify_desktop("✅ Likes counting again", f"@{username}: TikTok is confirming likes again.")
+        if hasattr(self, 'webhook_notifier'):
+            self.webhook_notifier.notify_delivery(username, kind, detail, seconds, self.settings)
+
     def _on_milestone_reached(self, username: str, count: int, duration_sec: int = 0):
         self._notify_desktop("🎉 Like Milestone Reached!", f"@{username} reached {count:,} likes tapped!")
         if hasattr(self, 'webhook_notifier'):
@@ -4430,6 +4477,7 @@ class TikTokAutoLikerApp(QMainWindow):
                 tab = LiveTab(username, self.settings, tapper_enabled, is_muted, stats_mgr=self.stats_mgr, tabs_widget=self.tabs)
                 tab.stream_ended.connect(self._on_stream_ended_in_tab)
                 tab.milestone_reached.connect(self._on_milestone_reached)
+                tab.delivery_alert.connect(self._on_delivery_alert)
                 tab.mute_state_changed.connect(self._on_stream_mute_changed)
                 prefix = "❤️ " if tapper_enabled else ""
                 idx = self.tabs.addTab(tab, f"{prefix}LIVE: @{username}")

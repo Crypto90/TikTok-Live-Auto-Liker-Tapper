@@ -8,12 +8,16 @@ services:
     container_name: tiktok-live-autoliker
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      # Dashboard only on this host. To reach it from elsewhere, put an HTTPS reverse proxy in front
+      # (or change to "8080:8080" on a trusted network). Log in with the link from `docker logs`.
+      - "127.0.0.1:8080:8080"
     volumes:
       # Persist configuration, favorites, and cookies across container restarts
       - autoliker-data:/root/.config/tiktok_live_auto_liker
     environment:
       - PYTHONUNBUFFERED=1
+      # Optional fixed dashboard token instead of the generated one:
+      # - TIKTOK_AUTOLIKER_TOKEN=use-a-long-random-string
       - QTWEBENGINE_CHROMIUM_FLAGS=--disable-logging --log-level=3 --disable-gpu-memory-buffer-video-frames
 
 volumes:

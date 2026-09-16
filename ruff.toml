@@ -1,0 +1,6 @@
+# CI lint: only rules that catch real bugs (undefined names, syntax errors, broken comparisons),
+# e.g. the NameError that froze the stats bar in the desktop app.
+extend-exclude = ["build", "dist", "userdata", "avatars", "scratch", "server"]
+
+[lint]
+select = ["F821", "F822", "F823", "F811", "F632", "F7", "E9"]

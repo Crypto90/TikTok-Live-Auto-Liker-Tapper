@@ -6,11 +6,18 @@ Zero external dependencies (uses standard library http.server).
 """
 
 import os
+import re
 import sys
+import hmac
 import json
 import time
+import hashlib
+import secrets
+import ipaddress
 import threading
+from http.cookies import SimpleCookie, CookieError
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlsplit
 from typing import Dict, Any, Optional, List, Callable
 
 DASHBOARD_HTML = """<!DOCTYPE html>
@@ -366,6 +373,14 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             color: var(--text-muted);
         }
 
+        .delivery-badge {
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-size: 0.72rem;
+            font-weight: 700;
+        }
+        .delivery-limited { background: rgba(255, 165, 2, 0.15); color: #ffa502; }
+        .delivery-rejected, .delivery-unconfirmed { background: rgba(255, 71, 87, 0.15); color: #ff4757; }
         .live-badge {
             display: inline-flex;
             align-items: center;
@@ -887,6 +902,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                 <div class="sync-dot"></div>
                 <span id="syncText">Sync: Idle</span>
             </div>
+            <button class="btn btn-secondary" onclick="logout()" title="Log out of this dashboard">🔒 Log out</button>
         </div>
     </header>
 
@@ -962,16 +978,16 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                     <div class="form-group">
                         <div class="form-label">
                             <span>Base Delay</span>
-                            <span id="delayValLbl" style="color: var(--primary);">165 ms</span>
+                            <span id="delayValLbl" style="color: var(--primary);">200 ms</span>
                         </div>
-                        <input type="range" class="form-range" id="delaySlider" min="50" max="500" value="165" oninput="onSpeedChange()">
+                        <input type="range" class="form-range" id="delaySlider" min="200" max="500" value="200" oninput="onSpeedChange()">
                     </div>
                     <div class="form-group">
                         <div class="form-label">
                             <span>Randomization Jitter</span>
-                            <span id="randValLbl" style="color: var(--secondary);">35 ms</span>
+                            <span id="randValLbl" style="color: var(--secondary);">5 ms</span>
                         </div>
-                        <input type="range" class="form-range" id="randSlider" min="0" max="100" value="35" oninput="onSpeedChange()">
+                        <input type="range" class="form-range" id="randSlider" min="0" max="100" value="5" oninput="onSpeedChange()">
                     </div>
                     <div class="form-group" style="display: flex; align-items: center; gap: 8px; margin-bottom: 14px;">
                         <input type="checkbox" id="adaptiveChk" checked style="accent-color: var(--primary); width: 16px; height: 16px; cursor: pointer;">
@@ -1054,7 +1070,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                                 </div>
                                 <div class="form-group">
                                     <label class="form-label">Password / App Token</label>
-                                    <input type="password" class="form-input" id="syncWebdavPass" placeholder="Password or App Token">
+                                    <input type="password" class="form-input" id="syncWebdavPass" placeholder="Password or App Token" autocomplete="new-password">
                                 </div>
                             </div>
                         </div>
@@ -1067,7 +1083,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                             </div>
                             <div class="form-group">
                                 <label class="form-label">API Key (Optional)</label>
-                                <input type="password" class="form-input" id="syncRestKey" placeholder="Sync server API key if required">
+                                <input type="password" class="form-input" id="syncRestKey" placeholder="Sync server API key" autocomplete="new-password">
                             </div>
                         </div>
 
@@ -1088,6 +1104,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                                 </label>
                                 <div class="form-hint">Enables authenticated tapping across all connected computers & servers.</div>
                             </div>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Cookie Encryption Passphrase</label>
+                            <input type="password" class="form-input" id="syncCookiePass" placeholder="Same passphrase on every device" autocomplete="new-password">
+                            <div class="form-hint">Cookies are encrypted before they leave this server and only sync when a passphrase is set. Use the same passphrase on all devices.</div>
                         </div>
 
                         <div id="syncTestFeedback" style="display: none;" class="status-alert"></div>
@@ -1177,6 +1198,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                                 <th style="padding: 8px 12px;">Duration</th>
                                 <th style="padding: 8px 12px;">Verified Likes</th>
                                 <th style="padding: 8px 12px;">Taps Dispatched</th>
+                                <th style="padding: 8px 12px;">TikTok Limits</th>
                                 <th style="padding: 8px 12px;">Status</th>
                             </tr>
                         </thead>
@@ -1215,8 +1237,82 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         </div>
     </div>
 
+    <!-- Dashboard Login Modal -->
+    <div class="modal-overlay" id="loginModal">
+        <div class="modal-card">
+            <div class="modal-header">
+                <div class="modal-title">🔒 Dashboard Login</div>
+            </div>
+            <div class="modal-body">
+                <p style="font-size: 0.82rem; color: var(--text-muted); line-height: 1.5;">
+                    Enter the access token printed in the server console when it started.
+                    It is also stored in <code>dashboard_token.txt</code> in the server's data folder.
+                </p>
+                <input type="password" id="loginTokenInput" class="form-input" placeholder="Access token" autocomplete="current-password" onkeydown="if (event.key === 'Enter') submitLogin()">
+                <div id="loginError" style="font-size: 0.8rem; color: var(--primary); display: none;">That token is not valid.</div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-primary" onclick="submitLogin()">Log in</button>
+            </div>
+        </div>
+    </div>
+
     <script>
         let allFavorites = [];
+
+        function esc(value) {
+            return String(value ?? '').replace(/[&<>"']/g, ch => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[ch]));
+        }
+
+        // Any API call that comes back 401 means the session is gone: ask for the token again
+        const rawFetch = window.fetch.bind(window);
+        window.fetch = async (input, init) => {
+            const res = await rawFetch(input, init);
+            if (res.status === 401 && !String(input).startsWith('/api/login')) {
+                document.getElementById('loginModal').classList.add('open');
+            }
+            return res;
+        };
+
+        async function login(token) {
+            if (!token) return false;
+            const res = await rawFetch('/api/login', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ token })
+            });
+            return res.ok;
+        }
+
+        async function submitLogin() {
+            const ok = await login(document.getElementById('loginTokenInput').value.trim());
+            if (ok) {
+                location.reload();
+            } else {
+                document.getElementById('loginError').style.display = 'block';
+            }
+        }
+
+        async function logout() {
+            await rawFetch('/api/logout', { method: 'POST' });
+            location.reload();
+        }
+
+        async function ensureLoggedIn() {
+            // Login links carry the token in the URL fragment, which never reaches server logs
+            const hashToken = new URLSearchParams(location.hash.slice(1)).get('token');
+            if (hashToken) {
+                history.replaceState(null, '', location.pathname);
+                if (await login(hashToken)) return true;
+            }
+            try {
+                const res = await rawFetch('/api/auth');
+                if ((await res.json()).authenticated) return true;
+            } catch (e) {}
+            document.getElementById('loginModal').classList.add('open');
+            document.getElementById('loginTokenInput').focus();
+            return false;
+        }
         let activeStreams = [];
 
         function showToast(msg) {
@@ -1290,9 +1386,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                 <div class="stream-card">
                     <div class="stream-header">
                         <div class="stream-user">
-                            <img class="stream-avatar" src="${s.avatar_url || 'data:image/svg+xml;utf8,<svg xmlns=\\'http://www.w3.org/2000/svg\\' width=\\'40\\' height=\\'40\\' fill=\\'%23555\\'><circle cx=\\'20\\' cy=\\'20\\' r=\\'20\\'/></svg>'}" alt="${s.username}">
+                            <img class="stream-avatar" src="${esc(s.avatar_url) || 'data:image/svg+xml;utf8,<svg xmlns=\\'http://www.w3.org/2000/svg\\' width=\\'40\\' height=\\'40\\' fill=\\'%23555\\'><circle cx=\\'20\\' cy=\\'20\\' r=\\'20\\'/></svg>'}" alt="${esc(s.username)}">
                             <div class="stream-info">
-                                <h4>@${s.username}</h4>
+                                <h4>@${esc(s.username)}</h4>
                                 <p>Rate: ~${s.base_delay_ms || 100}ms ${s.live_rate ? '• ⚡ ' + s.live_rate + '/s' : ''}</p>
                             </div>
                         </div>
@@ -1303,15 +1399,16 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                     </div>
                     <div style="display: flex; justify-content: space-between; align-items: center; margin: 8px 0; padding: 6px 10px; background: rgba(255,255,255,0.03); border-radius: 6px; font-size: 0.8rem;">
                         <span style="color: #ff2d55; font-weight: 600;">❤️ Verified: ${(s.verified_likes || 0).toLocaleString()}</span>
+                        ${s.delivery && s.delivery !== 'ok' ? `<span class="delivery-badge delivery-${s.delivery}" title="${esc(s.delivery_detail)}">${s.delivery === 'limited' ? '⏸️' : '⚠️'} ${esc(s.delivery_label)}</span>` : ''}
                         <span style="color: var(--text-muted);">⏱️ ${formatDuration(s.duration_seconds || 0)}</span>
                     </div>
                     <div class="stream-controls">
                         <span style="font-size: 0.85rem; color: var(--text-muted);">Auto-Tapper:</span>
                         <div>
-                            <button class="icon-toggle" onclick="toggleCreator('${s.username}', 'tapper')" title="Toggle Tapping">
+                            <button class="icon-toggle" onclick="toggleCreator(${esc(JSON.stringify(s.username))}, 'tapper')" title="Toggle Tapping">
                                 ${s.tapper_enabled ? '❤️' : '🤍'}
                             </button>
-                            <button class="icon-toggle" onclick="toggleCreator('${s.username}', 'mute')" title="Toggle Audio Mute">
+                            <button class="icon-toggle" onclick="toggleCreator(${esc(JSON.stringify(s.username))}, 'mute')" title="Toggle Audio Mute">
                                 ${s.is_muted ? '🔇' : '🔊'}
                             </button>
                         </div>
@@ -1393,7 +1490,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                         <span style="font-weight: 700; color: ${i === 0 ? '#ffcc00' : (i === 1 ? '#00f2fe' : (i === 2 ? '#ff2d55' : 'var(--text-muted)'))}; font-size: 0.9rem;">
                             #${i + 1}
                         </span>
-                        <span style="font-weight: 600; color: #fff;">@${l.username}</span>
+                        <span style="font-weight: 600; color: #fff;">@${esc(l.username)}</span>
                     </div>
                     <div style="text-align: right;">
                         <div style="color: #ff2d55; font-weight: 700; font-size: 0.85rem;">❤️ ${l.verified_likes.toLocaleString()}</div>
@@ -1406,7 +1503,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         function renderAnalyticsSessions(sessions) {
             const tbody = document.getElementById('analyticsSessionsTbody');
             if (!sessions || !sessions.length) {
-                tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: var(--text-muted); padding: 1.5rem;">No stream sessions recorded yet.</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: var(--text-muted); padding: 1.5rem;">No stream sessions recorded yet.</td></tr>';
                 return;
             }
 
@@ -1417,17 +1514,22 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                 const h = Math.floor(m / 60);
                 const durStr = h > 0 ? `${h}h ${m % 60}m` : `${m}m ${durS % 60}s`;
                 const isAct = s.status === 'active';
+                const limSecs = s.limited_seconds || 0;
+                const limits = s.limit_count
+                    ? `${s.limit_count}x, ${limSecs >= 60 ? Math.floor(limSecs / 60) + 'm ' + String(limSecs % 60).padStart(2, '0') + 's' : limSecs + 's'}`
+                    : '-';
                 const statusBadge = isAct
                     ? '<span style="color: #2ed573; font-weight: 600;">● Active</span>'
-                    : `<span style="color: var(--text-muted);">${s.status || 'Completed'}</span>`;
+                    : `<span style="color: var(--text-muted);">${esc(s.status || 'Completed')}</span>`;
 
                 return `
                     <tr>
                         <td style="color: var(--text-muted);">${dateStr}</td>
-                        <td style="font-weight: 600; color: #fff;">@${s.username}</td>
+                        <td style="font-weight: 600; color: #fff;">@${esc(s.username)}</td>
                         <td>${durStr}</td>
                         <td style="color: #ff2d55; font-weight: 600;">❤️ ${(s.verified_likes || 0).toLocaleString()}</td>
                         <td style="color: var(--text-muted);">${(s.taps_dispatched || 0).toLocaleString()}</td>
+                        <td style="color: var(--text-muted);" title="${s.like_delay_ms ? 'Like delay: ' + s.like_delay_ms + ' ms' : ''}">${limits}</td>
                         <td>${statusBadge}</td>
                     </tr>
                 `;
@@ -1456,18 +1558,18 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             container.innerHTML = filtered.map(f => `
                 <div class="fav-row">
                     <div class="fav-user-info">
-                        <img class="fav-avatar" src="${f.avatar_url || 'data:image/svg+xml;utf8,<svg xmlns=\\'http://www.w3.org/2000/svg\\' width=\\'32\\' height=\\'32\\' fill=\\'%23555\\'><circle cx=\\'16\\' cy=\\'16\\' r=\\'16\\'/></svg>'}" alt="${f.username}">
-                        <span class="fav-username">@${f.username}</span>
+                        <img class="fav-avatar" src="${esc(f.avatar_url) || 'data:image/svg+xml;utf8,<svg xmlns=\\'http://www.w3.org/2000/svg\\' width=\\'32\\' height=\\'32\\' fill=\\'%23555\\'><circle cx=\\'16\\' cy=\\'16\\' r=\\'16\\'/></svg>'}" alt="${esc(f.username)}">
+                        <span class="fav-username">@${esc(f.username)}</span>
                         <span class="fav-status ${f.is_live ? 'live' : 'offline'}">${f.is_live ? '● LIVE' : 'Offline'}</span>
                     </div>
                     <div class="fav-actions">
-                        <button class="icon-toggle" onclick="toggleCreator('${f.username}', 'tapper')" title="Toggle Auto-Tapper">
+                        <button class="icon-toggle" onclick="toggleCreator(${esc(JSON.stringify(f.username))}, 'tapper')" title="Toggle Auto-Tapper">
                             ${f.tapper_enabled ? '❤️' : '🤍'}
                         </button>
-                        <button class="icon-toggle" onclick="toggleCreator('${f.username}', 'mute')" title="Toggle Mute">
+                        <button class="icon-toggle" onclick="toggleCreator(${esc(JSON.stringify(f.username))}, 'mute')" title="Toggle Mute">
                             ${f.is_muted ? '🔇' : '🔊'}
                         </button>
-                        <button class="icon-toggle" onclick="removeFavorite('${f.username}')" title="Remove Creator" style="color: #ff5252;">
+                        <button class="icon-toggle" onclick="removeFavorite(${esc(JSON.stringify(f.username))})" title="Remove Creator" style="color: #ff5252;">
                             ✕
                         </button>
                     </div>
@@ -1580,7 +1682,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                     let cls = 'log-entry';
                     if (l.includes('LIVE')) cls += ' log-live';
                     else if (l.includes('Synced')) cls += ' log-success';
-                    return `<div class="${cls}"><span class="log-time">[${l.time}]</span> ${l.message}</div>`;
+                    return `<div class="${cls}">${esc(l)}</div>`;
                 }).join('');
                 box.scrollTop = box.scrollHeight;
             } catch (e) {}
@@ -1620,9 +1722,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                 if (cfg.folder_path) document.getElementById('syncFolderPath').value = cfg.folder_path;
                 if (cfg.webdav_url) document.getElementById('syncWebdavUrl').value = cfg.webdav_url;
                 if (cfg.webdav_username) document.getElementById('syncWebdavUser').value = cfg.webdav_username;
-                if (cfg.webdav_password) document.getElementById('syncWebdavPass').value = cfg.webdav_password;
+                document.getElementById('syncWebdavPass').placeholder = cfg.webdav_password_set ? 'Saved (leave blank to keep)' : 'Password or App Token';
                 if (cfg.rest_url) document.getElementById('syncRestUrl').value = cfg.rest_url;
-                if (cfg.rest_api_key) document.getElementById('syncRestKey').value = cfg.rest_api_key;
+                document.getElementById('syncRestKey').placeholder = cfg.rest_api_key_set ? 'Saved (leave blank to keep)' : 'Sync server API key';
+                document.getElementById('syncCookiePass').placeholder = cfg.cookie_passphrase_set ? 'Saved (leave blank to keep)' : 'Same passphrase on every device';
                 if (cfg.auto_sync_interval_s) document.getElementById('syncIntervalSelect').value = String(cfg.auto_sync_interval_s);
                 document.getElementById('syncCookiesCheck').checked = cfg.sync_cookies !== false;
 
@@ -1680,7 +1783,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                 rest_url: document.getElementById('syncRestUrl').value.trim(),
                 rest_api_key: document.getElementById('syncRestKey').value.trim(),
                 auto_sync_interval_s: parseInt(document.getElementById('syncIntervalSelect').value) || 60,
-                sync_cookies: document.getElementById('syncCookiesCheck').checked
+                sync_cookies: document.getElementById('syncCookiesCheck').checked,
+                cookie_passphrase: document.getElementById('syncCookiePass').value
             };
 
             try {
@@ -1691,6 +1795,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                 });
                 const data = await res.json();
                 if (data.status === 'ok') {
+                    ['syncWebdavPass', 'syncRestKey', 'syncCookiePass'].forEach(id => document.getElementById(id).value = '');
+                    await fetchSyncConfig();
                     showToast('Cloud Sync settings saved!');
                     if (triggerNow && payload.enabled) {
                         await triggerSync();
@@ -1782,44 +1888,110 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             }
         }
 
-        // Initialize dashboard
-        fetchStatus();
-        fetchFavorites();
-        fetchSettings();
-        fetchSyncConfig();
-        fetchCookieStatus();
+        // Initialize dashboard once logged in
+        ensureLoggedIn().then(ok => {
+            if (!ok) return;
+            fetchStatus();
+            fetchFavorites();
+            fetchSettings();
+            fetchSyncConfig();
+            fetchCookieStatus();
 
-        // Real-time polling
-        setInterval(fetchStatus, 3000);
-        setInterval(fetchFavorites, 6000);
-        setInterval(fetchCookieStatus, 8000);
+            setInterval(fetchStatus, 3000);
+            setInterval(fetchFavorites, 6000);
+            setInterval(fetchCookieStatus, 8000);
+        });
     </script>
 </body>
 </html>
 """
 
 
+SESSION_COOKIE = "autoliker_session"
+TOKEN_ENV_VAR = "TIKTOK_AUTOLIKER_TOKEN"
+MAX_BODY_BYTES = 1_000_000
+USERNAME_RE = re.compile(r"[a-z0-9._]{1,32}")
+
+
+def load_or_create_access_token(data_dir: str) -> str:
+    """Dashboard access token: TIKTOK_AUTOLIKER_TOKEN if set, else a random token stored in data_dir."""
+    env_token = os.environ.get(TOKEN_ENV_VAR, "").strip()
+    if env_token:
+        return env_token
+    path = os.path.join(data_dir, "dashboard_token.txt")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            token = f.read().strip()
+        if token:
+            return token
+    except OSError:
+        pass
+    token = secrets.token_urlsafe(24)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(token)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    return token
+
+
+def is_loopback_host(host: str) -> bool:
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
     server_version = "TikTokLiveHeadlessWeb/1.0"
-    runner_ref = None  # Injected by WebServer
+    runner_ref = None  # Injected by HeadlessWebServer
+    access_token = ""  # Injected by HeadlessWebServer
 
-    def _send_json(self, status_code: int, data: Any):
+    def _send_json(self, status_code: int, data: Any, set_cookie: str = ""):
         payload = json.dumps(data).encode("utf-8")
         self.send_response(status_code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(payload)))
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        if set_cookie:
+            self.send_header("Set-Cookie", set_cookie)
         self.end_headers()
         self.wfile.write(payload)
 
-    def do_OPTIONS(self):
-        self.send_response(204)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.end_headers()
+    def _session_value(self) -> str:
+        return hmac.new(self.access_token.encode("utf-8"), b"dashboard-session", hashlib.sha256).hexdigest()
+
+    def _is_authenticated(self) -> bool:
+        if not self.access_token:
+            return False
+        auth = self.headers.get("Authorization", "")
+        if auth.startswith("Bearer ") and hmac.compare_digest(auth[7:].strip().encode("utf-8"), self.access_token.encode("utf-8")):
+            return True
+        try:
+            morsel = SimpleCookie(self.headers.get("Cookie", "")).get(SESSION_COOKIE)
+        except CookieError:
+            return False
+        return morsel is not None and hmac.compare_digest(morsel.value.encode("utf-8"), self._session_value().encode("utf-8"))
+
+    def _require_auth(self) -> bool:
+        if self._is_authenticated():
+            return True
+        self._send_json(401, {"error": "Login required"})
+        return False
+
+    def _is_same_origin(self) -> bool:
+        # Browsers label cross-site requests; reject them so other websites can't drive the dashboard
+        site = self.headers.get("Sec-Fetch-Site")
+        if site and site not in ("same-origin", "none"):
+            return False
+        origin = self.headers.get("Origin")
+        if origin:
+            return urlsplit(origin).netloc == self.headers.get("Host", "")
+        return True
 
     def do_GET(self):
         runner = self.runner_ref
@@ -1830,8 +2002,23 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(payload)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Frame-Options", "DENY")
+            self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("X-Content-Type-Options", "nosniff")
             self.end_headers()
             self.wfile.write(payload)
+            return
+
+        if path == "/api/auth":
+            self._send_json(200, {"authenticated": self._is_authenticated()})
+            return
+
+        if not self._is_same_origin():
+            self._send_json(403, {"error": "Cross-site request blocked"})
+            return
+        if not self._require_auth():
             return
 
         if path == "/api/status":
@@ -1925,18 +2112,49 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
         runner = self.runner_ref
         path = self.path.split("?")[0].rstrip("/")
 
-        content_len = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(content_len).decode("utf-8") if content_len > 0 else "{}"
+        if not self._is_same_origin():
+            self._send_json(403, {"error": "Cross-site request blocked"})
+            return
+
+        try:
+            content_len = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            content_len = 0
+        if content_len > MAX_BODY_BYTES:
+            self._send_json(413, {"error": "Request body too large"})
+            return
+        body = self.rfile.read(content_len).decode("utf-8", errors="replace") if content_len > 0 else "{}"
         try:
             payload = json.loads(body)
         except Exception:
             payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+
+        if path == "/api/login":
+            token = str(payload.get("token", ""))
+            if self.access_token and hmac.compare_digest(token.encode("utf-8"), self.access_token.encode("utf-8")):
+                cookie = f"{SESSION_COOKIE}={self._session_value()}; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000"
+                self._send_json(200, {"status": "ok"}, set_cookie=cookie)
+            else:
+                time.sleep(1.0)  # slow down token guessing
+                self._send_json(401, {"error": "Invalid access token"})
+            return
+
+        if path == "/api/logout":
+            self._send_json(200, {"status": "ok"}, set_cookie=f"{SESSION_COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0")
+            return
+
+        if not self._require_auth():
+            return
+
+        if path.startswith("/api/favorites/"):
+            username = str(payload.get("username", "")).strip().lower().replace("@", "")
+            if not USERNAME_RE.fullmatch(username):
+                self._send_json(400, {"error": "Valid TikTok username required"})
+                return
 
         if path == "/api/favorites/add":
-            username = str(payload.get("username", "")).strip().lower().replace("@", "")
-            if not username:
-                self._send_json(400, {"error": "Username required"})
-                return
             if runner:
                 runner.add_favorite(username)
             self._send_json(200, {"status": "ok", "username": username})
@@ -1944,9 +2162,6 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
 
         if path == "/api/favorites/remove":
             username = str(payload.get("username", "")).strip().lower().replace("@", "")
-            if not username:
-                self._send_json(400, {"error": "Username required"})
-                return
             if runner:
                 runner.remove_favorite(username)
             self._send_json(200, {"status": "ok", "username": username})
@@ -1955,9 +2170,6 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/favorites/toggle":
             username = str(payload.get("username", "")).strip().lower().replace("@", "")
             field = str(payload.get("field", "tapper"))
-            if not username:
-                self._send_json(400, {"error": "Username required"})
-                return
             if runner:
                 runner.toggle_favorite_field(username, field)
             self._send_json(200, {"status": "ok", "username": username, "field": field})
@@ -2022,20 +2234,33 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
 
 class HeadlessWebServer:
     """Manages the background HTTP server serving the Web Dashboard."""
-    def __init__(self, host: str = "0.0.0.0", port: int = 8080, runner_ref=None):
+    def __init__(self, host: str = "127.0.0.1", port: int = 8080, runner_ref=None, access_token: str = ""):
+        if not access_token:
+            raise ValueError("The web dashboard requires an access token")
         self.host = host
         self.port = port
         self.runner_ref = runner_ref
+        self.access_token = access_token
         self.httpd: Optional[HTTPServer] = None
         self._thread: Optional[threading.Thread] = None
 
+    @property
+    def login_url(self) -> str:
+        shown_host = "127.0.0.1" if self.host in ("0.0.0.0", "::", "") else self.host
+        return f"http://{shown_host}:{self.port}/#token={self.access_token}"
+
     def start(self):
-        DashboardHTTPRequestHandler.runner_ref = self.runner_ref
-        server_address = (self.host, self.port)
-        self.httpd = HTTPServer(server_address, DashboardHTTPRequestHandler)
+        handler = type("BoundDashboardHandler", (DashboardHTTPRequestHandler,), {
+            "runner_ref": self.runner_ref,
+            "access_token": self.access_token,
+        })
+        self.httpd = HTTPServer((self.host, self.port), handler)
+        self.port = self.httpd.server_address[1]
         self._thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
         self._thread.start()
-        print(f"[Web Dashboard] Server running at: http://{self.host}:{self.port}")
+        print(f"[Web Dashboard] Listening on http://{self.host}:{self.port}")
+        if not is_loopback_host(self.host):
+            print("[Web Dashboard] Reachable from other machines. Put it behind HTTPS (reverse proxy) before exposing it to the internet.")
 
     def stop(self):
         if self.httpd:

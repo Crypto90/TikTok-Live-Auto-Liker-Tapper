@@ -24,6 +24,16 @@ pip install -r requirements.txt
 python tiktok_live_auto_liker_tapper.py
 ```
 
+### Step 3: Run Lint & Tests
+```bash
+pip install -r requirements-dev.txt
+ruff check .
+pytest -q
+```
+- `ruff.toml` only enables bug-catching rules (undefined names, syntax errors), the class of bug that once froze the stats bar.
+- `tests/test_tapper_js.py` runs the in-page tapper script under Node.js (skipped when `node` is not installed).
+- GUI and headless tests need PyQt6; set `QT_QPA_PLATFORM=offscreen` on machines without a display.
+
 ---
 
 ## 2. Standalone Local Packaging (`build.py`)
@@ -51,6 +61,7 @@ python build.py
 - **Requirements**: Microsoft Edge WebView2 Runtime (installed by default on Windows 10/11)
 - **Output**: `dist/TikTokLiveAutoLiker.exe`
 - Standalone portable `.exe`, ready for distribution.
+- **Conda Python**: `build.py` adds conda's `Library\bin` to PATH for PyInstaller automatically. After building it checks that the DLLs Python's own modules need (e.g. `ffi.dll` for `ctypes`, OpenSSL) are inside the exe and fails the build otherwise, instead of producing an exe that crashes with `DLL load failed while importing _ctypes`.
 
 ### 🐧 Linux
 - **Requirements**:
@@ -72,8 +83,11 @@ python build.py
 The project uses `.github/workflows/build.yml` to automatically compile and release binaries for all 3 platforms whenever a tag is pushed.
 
 ### Workflow Pipeline:
+Every push first runs the **Lint & Tests** job (`ruff check .`, `pytest`); the platform builds only start when it passes.
 ```
 git tag vX.Y.Z ───► git push origin --tags
+                         │
+                    Lint & Tests
                          │
         ┌────────────────┼────────────────┐
         ▼                ▼                ▼

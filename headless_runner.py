@@ -20,7 +20,7 @@ import signal
 import shutil
 import argparse
 import subprocess
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Tuple
 
 # Suppress console spam from QtWebEngine
 os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--disable-logging --log-level=3 --disable-gpu-memory-buffer-video-frames"
@@ -63,9 +63,9 @@ from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import QTimer, QObject, pyqtSlot
 
 from webview_engine import UniversalWebView
-from sync_manager import SyncManager, get_device_name
-from web_server import HeadlessWebServer
-from stats_manager import StatsManager
+from sync_manager import SyncManager, get_device_name, public_settings
+from web_server import HeadlessWebServer, load_or_create_access_token
+from stats_manager import StatsManager, TapperStatsProcessor
 
 
 def get_server_data_dir() -> str:
@@ -97,9 +97,8 @@ class HeadlessStreamTab(QObject):
         self.taps_dispatched = 0
         self.room_likes = 0
         self.live_rate = 0.0
-        self._last_verified = 0
-        self._last_dispatched = 0
-        self._last_stats_tick = time.time()
+        self.delivery, self.delivery_label, self.delivery_detail = "ok", "", ""
+        self._stats = TapperStatsProcessor()
 
         self.webview = UniversalWebView(
             parent=None,
@@ -124,57 +123,39 @@ class HeadlessStreamTab(QObject):
         if self.is_active:
             self.webview.get_tapper_stats(self._on_tapper_stats_result)
 
-        res = result_dict.get('result', {})
-        if isinstance(res, str):
-            try: res = json.loads(res)
-            except Exception: res = {}
-        if hasattr(res, 'items') and not isinstance(res, dict):
-            res = dict(res)
-        if not isinstance(res, dict):
+    def _on_tapper_stats_result(self, result_dict):
+        res = TapperStatsProcessor.parse(result_dict)
+        if res is None:
             return
+        snap = self._stats.process(res, time.time(), self.tapper_enabled, self.settings, background=True)
+        self.verified_likes = snap.verified
+        self.taps_dispatched = snap.dispatched
+        self.room_likes = snap.room_likes
+        self.live_rate = snap.live_rate
+        self.delivery, self.delivery_label, self.delivery_detail = snap.delivery, snap.delivery_label, snap.delivery_detail
 
-        dispatched = int(res.get('dispatched', 0) or 0)
-        verified = int(res.get('verified', 0) or 0)
-        failed = int(res.get('failed', 0) or 0)
-        room_likes = int(res.get('roomLikes', 0) or 0)
+        if snap.burst_taps:
+            self.webview.burst_tapper(snap.burst_taps)
 
-        now = time.time()
-        dt = max(0.5, now - self._last_stats_tick)
-        delta_v = max(0, verified - self._last_verified)
-        delta_d = max(0, dispatched - self._last_dispatched)
-        if delta_v > 0:
-            self.live_rate = round(delta_v / dt, 1)
-        elif delta_d > 0:
-            self.live_rate = round(delta_d / dt, 1)
-        else:
-            self.live_rate = 0.0
-
-        # Headless background catch-up watchdog:
-        if self.tapper_enabled and dt >= 0.8:
-            base = self.settings.get("like_delay_ms", 165)
-            rand = self.settings.get("randomization_ms", 35)
-            avg_delay_ms = max(40, base + (rand // 2))
-            expected = int(round((dt * 1000.0) / avg_delay_ms))
-            needed = max(0, min(10, expected - delta_d))
-            if needed > 0:
-                self.webview.burst_tapper(needed)
-
-        self._last_stats_tick = now
-        self._last_verified = verified
-        self._last_dispatched = dispatched
-        self.verified_likes = verified
-        self.taps_dispatched = dispatched
-        self.room_likes = room_likes
+        runner = self.parent()
+        if snap.alert and hasattr(runner, "log"):
+            if snap.alert == "not_counting":
+                runner.log(f"[NOT COUNTING] @{self.username}: {snap.delivery_detail}")
+            else:
+                runner.log(f"[COUNTING AGAIN] @{self.username}: TikTok is confirming likes again.")
 
         if self.stats_mgr and self.session_id:
-            self.stats_mgr.record_progress(self.session_id, verified, dispatched, failed, room_likes)
+            self.stats_mgr.record_progress(
+                self.session_id, snap.verified, snap.dispatched, snap.failed, snap.room_likes,
+                limit_count=snap.limit_count, limited_seconds=snap.limited_seconds,
+                like_delay_ms=self.settings.get("like_delay_ms"))
 
     def _on_nav_completed(self, success, url):
         if success:
             self.webview.set_muted(True)
             self.webview.evaluate_js("(function() { var v = document.querySelector('video'); if (v && v.paused) v.play().catch(function(){}); })();")
-            base = self.settings.get("like_delay_ms", 165)
-            rand = self.settings.get("randomization_ms", 35)
+            base = self.settings.get("like_delay_ms", 200)
+            rand = self.settings.get("randomization_ms", 5)
             adaptive = self.settings.get("adaptive_rate", True)
             self.webview.inject_in_page_tapper(base, rand, enabled=self.tapper_enabled, adaptive=adaptive)
 
@@ -187,8 +168,8 @@ class HeadlessStreamTab(QObject):
 
     def update_settings(self, settings: dict):
         self.settings = settings
-        base = self.settings.get("like_delay_ms", 165)
-        rand = self.settings.get("randomization_ms", 35)
+        base = self.settings.get("like_delay_ms", 200)
+        rand = self.settings.get("randomization_ms", 5)
         adaptive = self.settings.get("adaptive_rate", True)
         self.webview.set_tapper_rate(base, rand, adaptive=adaptive)
 
@@ -201,6 +182,7 @@ class HeadlessStreamTab(QObject):
         })();"""
         self.webview.evaluate_js(js, self._on_health_result)
 
+    def _on_health_result(self, result_dict):
         res = result_dict.get('result', {})
         if isinstance(res, str):
             try: res = json.loads(res)
@@ -225,7 +207,11 @@ class HeadlessStreamTab(QObject):
 
 class HeadlessServerManager(QObject):
     """Main orchestrator for headless live checking, tapping, sync, and web interface."""
-    def __init__(self, port: int = 8080, enable_web: bool = True):
+    SYNC_CONFIG_KEYS = ("enabled", "method", "folder_path", "webdav_url", "webdav_username", "webdav_password",
+                        "rest_url", "rest_api_key", "auto_sync_interval_s", "sync_cookies", "cookie_passphrase")
+    SECRET_SYNC_KEYS = ("webdav_password", "rest_api_key", "cookie_passphrase")
+
+    def __init__(self, port: int = 8080, enable_web: bool = True, host: str = "127.0.0.1", access_token: str = ""):
         super().__init__()
         self.port = port
         self.enable_web = enable_web
@@ -260,7 +246,8 @@ class HeadlessServerManager(QObject):
         # 4. Web Dashboard
         self.web_server = None
         if self.enable_web:
-            self.web_server = HeadlessWebServer(host="0.0.0.0", port=self.port, runner_ref=self)
+            token = access_token or load_or_create_access_token(DATA_DIR)
+            self.web_server = HeadlessWebServer(host=host, port=self.port, runner_ref=self, access_token=token)
             self.web_server.start()
 
         # 5. Monitoring loop (every 10 seconds)
@@ -301,7 +288,7 @@ class HeadlessServerManager(QObject):
 
     def _load_settings(self) -> dict:
         set_file = os.path.join(DATA_DIR, "settings.json")
-        default_s = {"like_delay_ms": 165, "randomization_ms": 35, "adaptive_rate": True}
+        default_s = {"like_delay_ms": 200, "randomization_ms": 5, "adaptive_rate": True}
         if os.path.exists(set_file):
             try:
                 with open(set_file, "r") as f:
@@ -424,6 +411,9 @@ class HeadlessServerManager(QObject):
                 "verified_likes": tab.verified_likes,
                 "taps_dispatched": tab.taps_dispatched,
                 "live_rate": tab.live_rate,
+                "delivery": tab.delivery,
+                "delivery_label": tab.delivery_label,
+                "delivery_detail": tab.delivery_detail,
                 "room_likes": tab.room_likes,
                 "duration_seconds": int(time.time() - tab.start_time)
             })
@@ -492,10 +482,21 @@ class HeadlessServerManager(QObject):
             self.sync_mgr.record_local_change()
 
     def get_settings(self) -> dict:
-        return self.settings
+        return public_settings(self.settings)
 
     def update_settings(self, new_s: dict):
-        self.settings.update(new_s)
+        # Only the tapping controls are editable from the dashboard
+        allowed = {}
+        try:
+            if "like_delay_ms" in new_s:
+                allowed["like_delay_ms"] = min(500, max(200, int(new_s["like_delay_ms"])))
+            if "randomization_ms" in new_s:
+                allowed["randomization_ms"] = min(100, max(0, int(new_s["randomization_ms"])))
+        except (TypeError, ValueError):
+            return
+        if "adaptive_rate" in new_s:
+            allowed["adaptive_rate"] = bool(new_s["adaptive_rate"])
+        self.settings.update(allowed)
         self.settings["updated_at"] = time.time()
         with open(os.path.join(DATA_DIR, "settings.json"), "w") as f:
             json.dump(self.settings, f, indent=2)
@@ -518,18 +519,28 @@ class HeadlessServerManager(QObject):
             "folder_path": sync_cfg.get("folder_path", ""),
             "webdav_url": sync_cfg.get("webdav_url", ""),
             "webdav_username": sync_cfg.get("webdav_username", ""),
-            "webdav_password": sync_cfg.get("webdav_password", ""),
+            "webdav_password_set": bool(sync_cfg.get("webdav_password")),
             "rest_url": sync_cfg.get("rest_url", ""),
-            "rest_api_key": sync_cfg.get("rest_api_key", ""),
+            "rest_api_key_set": bool(sync_cfg.get("rest_api_key")),
+            "cookie_passphrase_set": bool(sync_cfg.get("cookie_passphrase")),
             "auto_sync_interval_s": int(sync_cfg.get("auto_sync_interval_s", 60)),
             "sync_cookies": bool(sync_cfg.get("sync_cookies", True)),
             "last_sync_time": self.sync_mgr.last_sync_time,
             "last_sync_status": self.sync_mgr.last_sync_status
         }
 
+    def _with_saved_secrets(self, cfg: dict) -> dict:
+        """Dashboard never receives stored secrets, so a blank secret field means "keep the saved one"."""
+        saved = self.sync_mgr._read_settings().get("sync", {})
+        merged = {k: cfg[k] for k in self.SYNC_CONFIG_KEYS if k in cfg}
+        for key in self.SECRET_SYNC_KEYS:
+            if not str(merged.get(key) or "").strip():
+                merged[key] = saved.get(key, "")
+        return merged
+
     def save_sync_config(self, cfg: dict) -> Tuple[bool, str]:
         s = self.sync_mgr._read_settings()
-        s["sync"] = cfg
+        s["sync"] = self._with_saved_secrets(cfg)
         self.sync_mgr._write_settings(s)
         self.sync_mgr.reload_config()
         self.log(f"[WEB] Sync configuration saved (Method: {cfg.get('method')}, Enabled: {cfg.get('enabled')})")
@@ -537,7 +548,7 @@ class HeadlessServerManager(QObject):
 
     def test_sync_config(self, cfg: dict) -> Tuple[bool, str]:
         from sync_manager import create_backend
-        backend = create_backend(cfg)
+        backend = create_backend(self._with_saved_secrets(cfg))
         if not backend:
             return False, "Could not create backend for the specified method."
         return backend.test_connection()
@@ -611,6 +622,11 @@ class HeadlessServerManager(QObject):
 def main():
     parser = argparse.ArgumentParser(description="TikTok Live Auto-Liker Headless Server")
     parser.add_argument("--port", type=int, default=8080, help="Web dashboard port (default: 8080)")
+    parser.add_argument("--host", default="127.0.0.1",
+                        help="Address the web dashboard listens on (default: 127.0.0.1; use 0.0.0.0 to allow other machines)")
+    parser.add_argument("--token", default="",
+                        help="Dashboard access token (default: TIKTOK_AUTOLIKER_TOKEN or a generated token saved in the data folder)")
+    parser.add_argument("--headless", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--no-web", action="store_true", help="Disable the built-in web dashboard")
     parser.add_argument("--sync-only", action="store_true", help="Run a single sync cycle and exit immediately")
     args = parser.parse_args()
@@ -624,7 +640,7 @@ def main():
 
     app = QApplication(sys.argv)
 
-    server = HeadlessServerManager(port=args.port, enable_web=not args.no_web)
+    server = HeadlessServerManager(port=args.port, enable_web=not args.no_web, host=args.host, access_token=args.token)
 
     def handle_signal(sig, frame):
         print(f"\nReceived signal {sig}. Shutting down headless server...")
@@ -641,8 +657,9 @@ def main():
     print("=" * 60)
     print("  TikTok Live Auto-Liker — Headless Server Running")
     print("=" * 60)
-    if not args.no_web:
-        print(f"  Web Dashboard: http://0.0.0.0:{args.port}")
+    if server.web_server:
+        print(f"  Web Dashboard: {server.web_server.login_url}")
+        print("  (the link contains your access token; keep it private)")
     print(f"  Data Folder:   {DATA_DIR}")
     print("  Press Ctrl+C to stop.")
     print("=" * 60)

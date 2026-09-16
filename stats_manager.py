@@ -3,7 +3,188 @@ import json
 import time
 import uuid
 import threading
+from dataclasses import dataclass
+from typing import Optional
 from datetime import datetime, timezone
+
+
+def describe_delivery(stats: dict):
+    """Map the in-page delivery state to (state, short label, explanation).
+
+    state is "ok" while TikTok confirms likes; "limited", "rejected" and
+    "unconfirmed" all mean likes are currently not counting.
+    """
+    state = stats.get("delivery") or "ok"
+    if state == "limited":
+        secs = (int(stats.get("blockedRemainingMs") or 0) + 999) // 1000
+        remaining = f"{secs // 60}m {secs % 60:02d}s" if secs >= 60 else f"{secs}s"
+        hits = int(stats.get("blockCount") or 0)
+        return (state, f"TikTok limit, {remaining}",
+                f"TikTok is rate-limiting likes, so taps don't count right now. "
+                f"Tapping is paused and resumes in {remaining}. Limit hit {hits}x this session.")
+    if state == "rejected":
+        return (state, "Likes rejected",
+                f"TikTok rejected the last like batch ({stats.get('lastRejectStatus')}). Likes aren't counting.")
+    if state == "unconfirmed":
+        taps = int(stats.get("unconfirmedTaps") or 0)
+        return (state, "Not counting",
+                f"{taps:,} taps sent without a confirmation from TikTok, so likes aren't counting. "
+                f"Check that you're logged in.")
+    return ("ok", "", "")
+
+
+class LiveRateTracker:
+    """Likes/s readout for one stream.
+
+    TikTok acknowledges likes in batches (one request per ~15 taps), so the
+    verified counter moves in steps. Measuring between batch ACKs keeps the
+    rate steady; dispatched taps stand in until two ACKs have arrived.
+    """
+
+    ACK_WINDOW_S = 20.0
+    DISPATCH_WINDOW_S = 4.0
+    STALE_AFTER_S = 10.0
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self._acks = []
+        self._dispatches = []
+        self._last_verified = 0
+        self._last_dispatched = 0
+        self._last_ack_at = 0.0
+
+    def update(self, now: float, verified: int, dispatched: int, last_ack_ms: float = 0) -> float:
+        if verified < self._last_verified or dispatched < self._last_dispatched:
+            self.reset()  # page reloaded, in-page counters restarted
+        if verified > self._last_verified:
+            self._last_ack_at = last_ack_ms / 1000.0 if last_ack_ms else now
+            self._acks.append((self._last_ack_at, verified))
+        self._last_verified = verified
+        self._last_dispatched = dispatched
+
+        self._acks = [a for a in self._acks if now - a[0] <= self.ACK_WINDOW_S]
+        self._dispatches.append((now, dispatched))
+        self._dispatches = [d for d in self._dispatches if now - d[0] <= self.DISPATCH_WINDOW_S]
+
+        if verified > 0 and now - self._last_ack_at > self.STALE_AFTER_S:
+            return 0.0
+        if len(self._acks) >= 2:
+            (t0, v0), (t1, v1) = self._acks[0], self._acks[-1]
+            return round((v1 - v0) / max(0.5, t1 - t0), 1)
+        (t0, d0), (t1, d1) = self._dispatches[0], self._dispatches[-1]
+        # Poll callbacks can arrive back-to-back after a UI stall; never divide by less than one poll
+        return round((d1 - d0) / max(1.0, t1 - t0), 1) if len(self._dispatches) >= 2 else 0.0
+
+
+NOT_COUNTING_ALERT_S = 180
+
+
+@dataclass
+class TapperSnapshot:
+    dispatched: int = 0
+    verified: int = 0
+    failed: int = 0
+    room_likes: int = 0
+    blocked_ms: int = 0
+    limit_count: int = 0
+    limited_seconds: int = 0
+    current_delay: int = 0
+    live_rate: float = 0.0
+    confirmed_pct: float = 100.0
+    delivery: str = "ok"
+    delivery_label: str = ""
+    delivery_detail: str = ""
+    not_counting_seconds: int = 0
+    burst_taps: int = 0
+    wakeup: bool = False
+    alert: str = ""  # "not_counting" once an episode passes the alert threshold, "recovered" when it ends
+
+
+class TapperStatsProcessor:
+    """Turns one in-page stats reading into display values, alerts and watchdog actions.
+
+    Shared by the desktop tabs and the headless runner so both behave the same.
+    """
+
+    def __init__(self, alert_after_s: float = NOT_COUNTING_ALERT_S):
+        self.alert_after_s = alert_after_s
+        self.rate = LiveRateTracker()
+        self._last_tick = time.time()
+        self._last_dispatched = 0
+        self._not_counting_since = None
+        self._alerted = False
+
+    @staticmethod
+    def parse(result_dict) -> Optional[dict]:
+        res = result_dict.get("result") if isinstance(result_dict, dict) else None
+        if isinstance(res, str):
+            try:
+                res = json.loads(res)
+            except ValueError:
+                return None
+        if hasattr(res, "items") and not isinstance(res, dict):
+            res = dict(res)
+        return res if isinstance(res, dict) else None
+
+    def process(self, res: dict, now: float, tapper_enabled: bool, settings: dict, background: bool = True) -> TapperSnapshot:
+        def num(key):
+            try:
+                return int(res.get(key) or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        snap = TapperSnapshot(
+            dispatched=num("dispatched"), verified=num("verified"), failed=num("failed"),
+            room_likes=num("roomLikes"), blocked_ms=num("blockedRemainingMs"), limit_count=num("blockCount"),
+            limited_seconds=num("limitedSeconds"), current_delay=num("currentDelay"),
+        )
+        snap.live_rate = self.rate.update(now, snap.verified, snap.dispatched, res.get("lastAckTime") or 0)
+        if snap.dispatched > 0:
+            snap.confirmed_pct = min(100.0, round(snap.verified / snap.dispatched * 100.0, 1))
+
+        if not tapper_enabled:
+            self._not_counting_since, self._alerted = None, False
+        else:
+            snap.delivery, snap.delivery_label, snap.delivery_detail = describe_delivery(res)
+            if snap.delivery == "ok":
+                if self._alerted:
+                    snap.alert = "recovered"
+                self._not_counting_since, self._alerted = None, False
+            else:
+                if self._not_counting_since is None:
+                    self._not_counting_since = now
+                snap.not_counting_seconds = int(now - self._not_counting_since)
+                if not self._alerted and snap.not_counting_seconds >= self.alert_after_s:
+                    self._alerted = True
+                    snap.alert = "not_counting"
+
+        # Watchdog: top up taps only when the in-page loop clearly fell behind (e.g. throttled timers),
+        # so a healthy loop doesn't get extra taps that TikTok's throttle would just merge
+        dt = max(0.5, now - self._last_tick)
+        delta_d = max(0, snap.dispatched - self._last_dispatched)
+        if tapper_enabled and snap.blocked_ms == 0:
+            if background and dt >= 0.8:
+                avg_delay_ms = max(200, int(settings.get("like_delay_ms", 200))) + int(settings.get("randomization_ms", 5)) // 2
+                expected = int(round(dt * 1000.0 / avg_delay_ms))
+                if delta_d * 2 < expected:
+                    snap.burst_taps = min(3, expected - delta_d)
+            elif not background and delta_d == 0 and dt >= 1.5:
+                snap.wakeup = True
+        self._last_tick = now
+        self._last_dispatched = snap.dispatched
+        return snap
+
+
+def format_limits(session: dict) -> str:
+    """Session limit summary, e.g. "2x, 3m 10s", or "-" when TikTok never limited likes."""
+    count = int(session.get("limit_count") or 0)
+    if not count:
+        return "-"
+    secs = int(session.get("limited_seconds") or 0)
+    duration = f"{secs // 60}m {secs % 60:02d}s" if secs >= 60 else f"{secs}s"
+    return f"{count}x, {duration}"
 
 
 class StatsManager:
@@ -85,6 +266,9 @@ class StatsManager:
                 "verified_likes": 0,
                 "taps_dispatched": 0,
                 "failed_requests": 0,
+                "limit_count": 0,
+                "limited_seconds": 0,
+                "like_delay_ms": None,
                 "room_likes_start": int(room_likes_start or 0),
                 "room_likes_end": int(room_likes_start or 0),
                 "status": "active"
@@ -92,7 +276,8 @@ class StatsManager:
             self._active_sessions[session_id] = session
             return session_id
 
-    def record_progress(self, session_id: str, verified_likes: int, taps_dispatched: int, failed: int = 0, room_likes: int = 0):
+    def record_progress(self, session_id: str, verified_likes: int, taps_dispatched: int, failed: int = 0, room_likes: int = 0,
+                        limit_count: int = 0, limited_seconds: int = 0, like_delay_ms: Optional[int] = None):
         with self._lock:
             if session_id not in self._active_sessions:
                 return
@@ -100,6 +285,10 @@ class StatsManager:
             sess["verified_likes"] = max(sess["verified_likes"], int(verified_likes or 0))
             sess["taps_dispatched"] = max(sess["taps_dispatched"], int(taps_dispatched or 0))
             sess["failed_requests"] = max(sess["failed_requests"], int(failed or 0))
+            sess["limit_count"] = max(sess.get("limit_count", 0), int(limit_count or 0))
+            sess["limited_seconds"] = max(sess.get("limited_seconds", 0), int(limited_seconds or 0))
+            if like_delay_ms:
+                sess["like_delay_ms"] = int(like_delay_ms)
             if room_likes > 0:
                 sess["room_likes_end"] = int(room_likes)
             sess["duration_seconds"] = max(0, int(time.time() - sess["started_at"]))
@@ -275,14 +464,16 @@ class StatsManager:
 
     def export_csv(self) -> str:
         with self._lock:
-            lines = ["Session ID,Streamer,Start Time,End Time,Duration (s),Verified Likes,Taps Dispatched,Room Start,Room End,Status"]
+            lines = ["Session ID,Streamer,Start Time,End Time,Duration (s),Verified Likes,Taps Dispatched,Room Start,Room End,Status,"
+                     "TikTok Limits,Limited (s),Like Delay (ms)"]
             for s in sorted(self.data["sessions"], key=lambda x: x.get("started_at", 0), reverse=True):
                 st = datetime.fromtimestamp(s.get("started_at", 0), tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S") if s.get("started_at") else ""
                 et = datetime.fromtimestamp(s.get("ended_at", 0), tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S") if s.get("ended_at") else ""
                 lines.append(
                     f"{s.get('session_id')},{s.get('username')},{st},{et},{s.get('duration_seconds')},"
                     f"{s.get('verified_likes')},{s.get('taps_dispatched')},{s.get('room_likes_start')},"
-                    f"{s.get('room_likes_end')},{s.get('status')}"
+                    f"{s.get('room_likes_end')},{s.get('status')},{s.get('limit_count', 0)},{s.get('limited_seconds', 0)},"
+                    f"{s.get('like_delay_ms') or ''}"
                 )
             return "\n".join(lines)
 

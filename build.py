@@ -16,12 +16,52 @@ APP_NAME = "TikTokLiveAutoLiker"
 MAIN_SCRIPT = "tiktok_live_auto_liker_tapper.py"
 
 
+def build_env() -> dict:
+    """Environment for PyInstaller.
+
+    A conda Python keeps native DLLs such as ffi.dll (needed by ctypes) and OpenSSL in Library/bin.
+    PyInstaller only finds them when that folder is on PATH, as after `conda activate`; without it
+    the exe builds fine but crashes at startup with "DLL load failed while importing _ctypes".
+    """
+    env = os.environ.copy()
+    prefix = sys.base_prefix
+    if sys.platform == "win32" and os.path.isdir(os.path.join(prefix, "conda-meta")):
+        dirs = [prefix, os.path.join(prefix, "Library", "mingw-w64", "bin"), os.path.join(prefix, "Library", "usr", "bin"),
+                os.path.join(prefix, "Library", "bin"), os.path.join(prefix, "Scripts")]
+        env["PATH"] = os.pathsep.join(dirs + [env.get("PATH", "")])
+    return env
+
+
 def run_cmd(cmd):
     print(f"Running: {' '.join(cmd)}")
-    res = subprocess.run(cmd)
+    res = subprocess.run(cmd, env=build_env())
     if res.returncode != 0:
         print(f"Error: Command failed with exit code {res.returncode}")
         sys.exit(res.returncode)
+
+
+def missing_python_dlls(exe_path: str) -> list:
+    """DLLs that Python's own extension modules import, ship with this Python install, but are not in the exe."""
+    import glob
+    import pefile
+    from PyInstaller.archive.readers import CArchiveReader
+
+    bundled = {os.path.basename(name).lower() for name in CArchiveReader(exe_path).toc.keys()}
+    prefix = sys.base_prefix
+    search_dirs = [os.path.join(prefix, "DLLs"), os.path.join(prefix, "Library", "bin"), prefix]
+    missing = []
+    for module in ("_ctypes", "_ssl", "_hashlib", "_lzma", "_bz2", "pyexpat"):
+        pyds = glob.glob(os.path.join(prefix, "DLLs", f"{module}*.pyd"))
+        if not pyds:
+            continue
+        pe = pefile.PE(pyds[0], fast_load=True)
+        pe.parse_data_directories(directories=[pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_IMPORT"]])
+        for entry in getattr(pe, "DIRECTORY_ENTRY_IMPORT", []):
+            dll = entry.dll.decode("ascii", "ignore").lower()
+            # System DLLs come from Windows itself; only the ones shipped with this Python must be bundled
+            if dll not in bundled and any(os.path.exists(os.path.join(d, dll)) for d in search_dirs):
+                missing.append(f"{module} needs {dll}")
+    return missing
 
 
 def clean():
@@ -144,6 +184,14 @@ def build_windows():
 
     cmd.append(MAIN_SCRIPT)
     run_cmd(cmd)
+
+    exe_path = os.path.join("dist", f"{APP_NAME}.exe")
+    missing = missing_python_dlls(exe_path)
+    if missing:
+        print("\n[ERROR] The exe would crash at startup, required DLLs were not bundled:")
+        for item in missing:
+            print(f"  - {item}")
+        sys.exit(1)
     print(f"\n[SUCCESS] Windows executable built: dist/{APP_NAME}.exe")
 
 

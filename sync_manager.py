@@ -13,7 +13,10 @@ import os
 import sys
 import json
 import time
+import base64
 import socket
+import hashlib
+import functools
 import threading
 import urllib.request
 import urllib.error
@@ -44,6 +47,74 @@ def get_device_name() -> str:
         return socket.gethostname() or sys.platform
     except Exception:
         return sys.platform
+
+
+# Settings that never leave this device: sync credentials and alert secrets
+LOCAL_ONLY_SETTINGS = ("sync",)
+LOCAL_ONLY_NOTIFICATION_KEYS = ("discord_url", "telegram_token", "telegram_chat_id")
+
+
+def public_settings(settings: dict) -> dict:
+    """Copy of settings without credentials, safe to sync or send to a browser."""
+    clean = {k: v for k, v in (settings or {}).items() if k not in LOCAL_ONLY_SETTINGS}
+    notif = clean.get("notifications")
+    if isinstance(notif, dict):
+        clean["notifications"] = {k: v for k, v in notif.items() if k not in LOCAL_ONLY_NOTIFICATION_KEYS}
+    return clean
+
+
+def keep_local_secrets(incoming: dict, local: dict) -> dict:
+    """Synced settings with this device's own credentials put back."""
+    merged = public_settings(incoming)
+    for key in LOCAL_ONLY_SETTINGS:
+        if key in local:
+            merged[key] = local[key]
+    local_notif = local.get("notifications")
+    if isinstance(local_notif, dict):
+        notif = dict(merged.get("notifications") or {})
+        for key in LOCAL_ONLY_NOTIFICATION_KEYS:
+            if key in local_notif:
+                notif[key] = local_notif[key]
+        merged["notifications"] = notif
+    return merged
+
+
+COOKIE_AAD = b"tiktok-live-auto-liker/cookies/v1"
+SCRYPT_N, SCRYPT_R, SCRYPT_P = 2 ** 15, 8, 1
+
+
+@functools.lru_cache(maxsize=8)
+def _cookie_key(passphrase: str, salt: bytes, n: int, r: int, p: int) -> bytes:
+    return hashlib.scrypt(passphrase.encode("utf-8"), salt=salt, n=n, r=r, p=p, maxmem=128 * 1024 * 1024, dklen=32)
+
+
+def encrypt_cookies(cookies: list, passphrase: str) -> dict:
+    """Encrypt cookies for the sync target (AES-256-GCM, key derived with scrypt)."""
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    salt, nonce = os.urandom(16), os.urandom(12)
+    key = _cookie_key(passphrase, salt, SCRYPT_N, SCRYPT_R, SCRYPT_P)
+    data = AESGCM(key).encrypt(nonce, json.dumps(cookies).encode("utf-8"), COOKIE_AAD)
+    b64 = lambda raw: base64.b64encode(raw).decode("ascii")
+    return {"v": 1, "kdf": "scrypt", "n": SCRYPT_N, "r": SCRYPT_R, "p": SCRYPT_P,
+            "salt": b64(salt), "nonce": b64(nonce), "data": b64(data)}
+
+
+def decrypt_cookies(blob: dict, passphrase: str) -> Optional[list]:
+    """Cookies from an encrypted blob, or None if the passphrase is wrong or the blob is damaged."""
+    from cryptography.exceptions import InvalidTag
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    try:
+        n, r, p = int(blob["n"]), int(blob["r"]), int(blob["p"])
+        if not (2 ** 10 <= n <= 2 ** 17 and 1 <= r <= 16 and 1 <= p <= 4):
+            return None  # refuse parameters that would stall or exhaust memory
+        salt = base64.b64decode(blob["salt"])
+        nonce = base64.b64decode(blob["nonce"])
+        data = base64.b64decode(blob["data"])
+        plain = AESGCM(_cookie_key(passphrase, salt, n, r, p)).decrypt(nonce, data, COOKIE_AAD)
+        cookies = json.loads(plain.decode("utf-8"))
+        return cookies if isinstance(cookies, list) else None
+    except (InvalidTag, KeyError, ValueError, TypeError):
+        return None
 
 
 def parse_cookie_input(raw: str) -> list:
@@ -164,8 +235,8 @@ class SyncBundle:
         self.device_name = device_name or get_device_name()
         self.timestamp = time.time()
         self.settings = settings or {
-            "like_delay_ms": 165,
-            "randomization_ms": 35,
+            "like_delay_ms": 200,
+            "randomization_ms": 5,
             "adaptive_rate": True,
             "updated_at": time.time()
         }
@@ -188,9 +259,12 @@ class SyncBundle:
                     }
         # Tombstones: username -> deleted_at timestamp
         self.tombstones: Dict[str, float] = tombstones or {}
-        # TikTok session cookies
+        # TikTok session cookies: plaintext in memory, only `cookies_encrypted` goes to the sync target
         self.cookies: list = cookies or []
+        self.cookies_encrypted: Optional[dict] = None
         self.cookies_updated_at: float = float(cookies_updated_at or 0.0)
+        # Set when a fetched bundle still holds credentials or plaintext cookies from older versions
+        self.needs_rewrite = False
         # Stream sessions history
         self.sessions: list = sessions or []
 
@@ -203,14 +277,17 @@ class SyncBundle:
             "favorites": self.favorites,
             "tombstones": self.tombstones,
             "cookies": self.cookies,
+            "cookies_encrypted": self.cookies_encrypted,
             "cookies_updated_at": self.cookies_updated_at,
             "sessions": self.sessions
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> "SyncBundle":
+        raw_settings = data.get("settings")
+        clean_settings = public_settings(raw_settings) if isinstance(raw_settings, dict) else None
         b = cls(
-            settings=data.get("settings"),
+            settings=clean_settings or None,
             favorites=data.get("favorites"),
             tombstones=data.get("tombstones"),
             device_name=data.get("device_name"),
@@ -219,6 +296,9 @@ class SyncBundle:
             sessions=data.get("sessions", [])
         )
         b.timestamp = float(data.get("timestamp", time.time()))
+        blob = data.get("cookies_encrypted")
+        b.cookies_encrypted = blob if isinstance(blob, dict) else None
+        b.needs_rewrite = clean_settings != raw_settings or bool(b.cookies and not b.cookies_encrypted)
         return b
 
 
@@ -304,20 +384,20 @@ def merge_bundles(local: SyncBundle, remote: SyncBundle) -> Tuple[SyncBundle, bo
         if loc_s_time > rem_s_time:
             remote_changed = True
 
-    # 4. Merge cookies (higher cookies_updated_at wins)
+    # 4. Merge cookies (newer cookies_updated_at wins, so a newer sign-out clears other devices too)
     loc_c_time = float(local.cookies_updated_at or 0.0)
     rem_c_time = float(remote.cookies_updated_at or 0.0)
-    if rem_c_time > loc_c_time and remote.cookies:
-        merged.cookies = list(remote.cookies)
-        merged.cookies_updated_at = rem_c_time
+    if rem_c_time > loc_c_time:
+        winner = remote
         local_changed = True
-    elif loc_c_time > rem_c_time and local.cookies:
-        merged.cookies = list(local.cookies)
-        merged.cookies_updated_at = loc_c_time
+    elif loc_c_time > rem_c_time:
+        winner = local
         remote_changed = True
     else:
-        merged.cookies = list(local.cookies or remote.cookies or [])
-        merged.cookies_updated_at = max(loc_c_time, rem_c_time)
+        winner = local if (local.cookies or local.cookies_encrypted) else remote
+    merged.cookies = list(winner.cookies or [])
+    merged.cookies_encrypted = winner.cookies_encrypted
+    merged.cookies_updated_at = max(loc_c_time, rem_c_time)
 
     # 5. Merge stream sessions (conflict-free merge by session_id)
     merged_sessions = list(local.sessions or [])
@@ -663,8 +743,8 @@ class SyncManager(QObject):
 
     def _read_settings(self) -> dict:
         default_settings = {
-            "like_delay_ms": 165,
-            "randomization_ms": 35,
+            "like_delay_ms": 200,
+            "randomization_ms": 5,
             "adaptive_rate": True,
             "updated_at": time.time()
         }
@@ -747,7 +827,7 @@ class SyncManager(QObject):
 
     def get_local_bundle(self) -> SyncBundle:
         """Create a SyncBundle from current local disk files."""
-        settings = self._read_settings()
+        settings = public_settings(self._read_settings())
         favs = self._read_favorites()
         cookies, cookies_updated_at = self._read_cookies()
 
@@ -785,6 +865,12 @@ class SyncManager(QObject):
             self._is_syncing = True
 
         try:
+            sync_cfg = self._read_settings().get("sync", {})
+            passphrase = str(sync_cfg.get("cookie_passphrase") or "")
+            wants_cookies = bool(sync_cfg.get("sync_cookies", True))
+            share_cookies = wants_cookies and bool(passphrase)
+            cookie_note = "" if share_cookies or not wants_cookies else " (cookies not synced: set a cookie passphrase)"
+
             # 1. Fetch remote bundle
             remote_bundle, err = self.backend.fetch_bundle()
             if err:
@@ -796,27 +882,38 @@ class SyncManager(QObject):
 
             # 2. If no remote bundle exists yet, push local bundle to initialize remote
             if remote_bundle is None:
-                success, push_err = self.backend.push_bundle(local_bundle)
+                wire = self._wire_bundle(local_bundle, None, share_cookies, passphrase)
+                success, push_err = self.backend.push_bundle(wire)
                 if not success:
                     self.last_sync_status = f"Init push failed: {push_err}"
                     self.sync_failed.emit(self.last_sync_status)
                     return False, self.last_sync_status
                 self.last_sync_time = time.time()
-                self.last_sync_status = f"Initialized remote sync ({len(local_bundle.favorites)} creators)"
+                self.last_sync_status = f"Initialized remote sync ({len(local_bundle.favorites)} creators)" + cookie_note
                 self._save_sync_state()
                 self.sync_completed.emit(self.last_sync_status, False)
                 return True, self.last_sync_status
 
+            if share_cookies and remote_bundle.cookies_encrypted:
+                remote_cookies = decrypt_cookies(remote_bundle.cookies_encrypted, passphrase)
+                if remote_cookies is None:
+                    share_cookies = False
+                    cookie_note = " (cookies not synced: passphrase differs from the other devices)"
+                else:
+                    remote_bundle.cookies = remote_cookies
+            remote_cookie_state = (remote_bundle.cookies_encrypted, remote_bundle.cookies_updated_at)
+            if not share_cookies:
+                # Leave cookies out of the merge; the target keeps its encrypted cookies untouched
+                local_bundle.cookies, local_bundle.cookies_updated_at = [], 0.0
+                remote_bundle.cookies, remote_bundle.cookies_encrypted, remote_bundle.cookies_updated_at = [], None, 0.0
+
             # 3. Merge local and remote bundles
             merged_bundle, local_changed, remote_changed = merge_bundles(local_bundle, remote_bundle)
+            remote_changed = remote_changed or remote_bundle.needs_rewrite
 
             # 4. If local needs updates, save to disk
             if local_changed:
-                current_settings = self._read_settings()
-                sync_block = current_settings.get("sync", {})
-                new_settings = dict(merged_bundle.settings)
-                new_settings["sync"] = sync_block
-                self._write_settings(new_settings)
+                self._write_settings(keep_local_secrets(merged_bundle.settings, self._read_settings()))
 
                 new_favs = {
                     u: info.get("tapper_enabled", True) if isinstance(info, dict) else bool(info)
@@ -842,7 +939,8 @@ class SyncManager(QObject):
 
             # 5. If remote needs updates, push merged bundle back to remote
             if remote_changed:
-                push_ok, push_err = self.backend.push_bundle(merged_bundle)
+                wire = self._wire_bundle(merged_bundle, remote_cookie_state, share_cookies, passphrase)
+                push_ok, push_err = self.backend.push_bundle(wire)
                 if not push_ok:
                     self.last_sync_status = f"Push merged changes failed: {push_err}"
                     self.sync_failed.emit(self.last_sync_status)
@@ -860,6 +958,7 @@ class SyncManager(QObject):
             else:
                 msg = f"In sync ({fav_count} creators up to date)"
 
+            msg += cookie_note
             self.last_sync_status = msg
             self._save_sync_state()
             self.sync_completed.emit(msg, local_changed)
@@ -873,6 +972,26 @@ class SyncManager(QObject):
         finally:
             with self.lock:
                 self._is_syncing = False
+
+    @staticmethod
+    def _wire_bundle(bundle: SyncBundle, remote_cookie_state, share_cookies: bool, passphrase: str) -> SyncBundle:
+        """The bundle as it leaves this device: no credentials, cookies only in encrypted form."""
+        wire = SyncBundle(
+            settings=public_settings(bundle.settings),
+            favorites=bundle.favorites,
+            tombstones=bundle.tombstones,
+            device_name=bundle.device_name,
+            sessions=bundle.sessions,
+        )
+        wire.timestamp = bundle.timestamp
+        if share_cookies:
+            wire.cookies_updated_at = bundle.cookies_updated_at
+            wire.cookies_encrypted = encrypt_cookies(bundle.cookies, passphrase) if bundle.cookies else None
+        elif remote_cookie_state:
+            wire.cookies_encrypted, wire.cookies_updated_at = remote_cookie_state
+            if not wire.cookies_encrypted:
+                wire.cookies_updated_at = 0.0  # drops plaintext cookies left by older versions
+        return wire
 
     def sync_now_async(self, callback: Optional[Callable[[bool, str], None]] = None):
         """Run sync_now on a background thread."""

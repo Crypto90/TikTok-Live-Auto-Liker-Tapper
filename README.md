@@ -19,13 +19,16 @@
 
 ## 🌟 Highlights & Newest Capabilities
 
-- 🧠 **Smart Adaptive Auto-Throttling**: Closed-loop PID-style rate optimizer automatically monitors TikTok's client/server debounce and self-tunes delays in real time to guarantee **90%+ server confirmation rates**.
-- 🎯 **Clean Hotkey Dispatching**: Replaced dual-event collisions with native, bubbling `'L'` keypresses matching TikTok's desktop player architecture with built-in chat input safeguards.
+- 🧠 **Adaptive Rate Control**: Tunes the tap delay from server acknowledgments and pauses automatically while TikTok's like-frequency limit is active.
+- 🎯 **Clean Hotkey Dispatching**: One bubbling `'L'` keypress per tap, matched to TikTok's 200ms shortcut throttle, with chat input safeguards.
+- 🏃 **Full Speed in Background Tabs**: Streams in background tabs or a minimized window keep tapping at ~5 likes/s instead of being slowed to once per minute by the browser.
+- 🚦 **"Likes Not Counting" Indicator & Alerts**: Every tab, grid card, PiP window and the web dashboard shows when TikTok limits or rejects likes, with optional desktop, Discord and Telegram alerts.
+- 🔐 **Secured Headless Dashboard & Encrypted Cookie Sync**: Token login for the web dashboard, credentials that never leave the device, and TikTok session cookies synced only in encrypted form.
 - 🖼️ **Isolated Picture-in-Picture (PiP)**: Compact, always-on-top floating window that strips out TikTok's chat, gift menus, and UI chrome to display **only the pure live video** with overlay controls.
 - 🔲 **Multi-Stream Video Grid**: Monitor and like multiple live creators simultaneously in a responsive grid layout with per-card controls.
 - 🔊 **Bidirectional Audio & Mute Sync**: Volume sliders and mute toggles stay in instantaneous lockstep across the Stream Top Bar, Favorites List, PiP Overlay, and Grid Cards.
 - 🔔 **Multi-Channel Alerts**: Native desktop notifications, plus **Discord webhooks** and **Telegram bot** alerts when creators go live or reach major like milestones (10k, 25k, 50k, 100k, 250k, 500k, 1M).
-- ⏱️ **100% Server-Verified Like Accounting**: Dual-layer network sniffer intercepts HTTP `/webcast/room/like` and `/webcast/room/digg` across `fetch` and `XMLHttpRequest`, confirming `status_code === 0` before crediting.
+- ⏱️ **Server-Verified Like Accounting**: Network sniffer intercepts `/webcast/room/like/` across `fetch` and `XMLHttpRequest`, reads the batched `count` from each request, and credits it only when the server answers `status_code === 0`.
 - ☁️ **Multi-Device Cloud & Cookie Sync**: Synchronize favorites, audio settings, and authenticated TikTok login cookies across macOS, Windows, and Linux via Shared Folders (Google Drive / Dropbox / OneDrive), WebDAV (Nextcloud), or REST API.
 - 🖥️ **Tri-Platform Native Web Engines**: Apple WebKit (`WKWebView`) on macOS, Microsoft Edge WebView2 on Windows, and QtWebEngine Chromium on Linux.
 
@@ -92,13 +95,14 @@ Run unmonitored on home servers, Raspberry Pi, or cloud VPS instances with a sle
 
 ## 🚀 In-Depth Feature Breakdown
 
-### 🧠 Smart Adaptive Auto-Throttling (90%+ Confirmation Rate)
-- **Closed-Loop Feedback Controller**: Evaluates incoming server acknowledgments against dispatched taps every 20 taps.
-- **Dynamic Throttle Backoff**: When network congestion or TikTok's client debounce drops confirmation below 78%, base delay smoothly backs off by `+15ms` (up to 260ms max).
-- **Intelligent Speed Probing**: When delivery is flawless (≥90%), the engine gently probes faster by `-5ms` (down to 130ms min), finding the maximum like rate TikTok will accept.
-- **Sweet-Spot Defaults**: Defaults to **165ms Base Delay + 35ms Jitter** (~182ms interval), precisely respecting TikTok's ~180ms client debounce window.
-- **Live Latency Feedback**: Displays real-time adaptive speed directly inside the stats bar (e.g. `📶 98.4% Confirmed (165ms)`).
-- **Debounce-Respecting Bursts**: Background and minimized tabs use micro-spaced catch-up bursts (`Math.max(160, baseDelay)` ms) rather than instantaneous zero-delay floods.
+### 🧠 Adaptive Rate Control
+- **How TikTok counts likes**: The web player's `L` shortcut is throttled to one like per 200ms (about 5 likes/s). Taps are sent in batches: one `/webcast/room/like/` request per 15 taps, or after 500ms without a tap.
+- **Defaults**: **200ms base delay + 5ms jitter** (~4.9 likes/s at ~100% confirmed). Delays below 200ms are clamped because the throttle merges those taps.
+- **Feedback Controller**: Compares acknowledged likes to dispatched taps over 15-second windows (allowing for one unflushed batch) and backs off by `+10ms` when confirmation drops below 85%.
+- **Frequency-Limit Pause**: When TikTok answers `status_code 4021043`, tapping pauses until `like_blocked_until_ms` passes. TikTok ignores taps during that block anyway. The stats bar shows `⏸️ TikTok limit, 1m 36s` with a countdown.
+- **Stable Rate Readout**: Likes/s is measured between batch acknowledgments, so the display doesn't jump each time a batch of 15 arrives.
+- **Full Speed in Background Tabs**: Chromium normally runs timers in hidden pages about once per second, and once per minute after 5 minutes. The app starts WebView2 and QtWebEngine with background throttling disabled (on macOS it turns off WebKit's hidden-page timer throttling and App Nap). Measured with a 200ms timer: hidden tab after 5 minutes 0.02 → 4.98 runs/s, minimized window 1.0 → 4.98 runs/s.
+- **Watchdog Catch-Up**: If a tab still falls behind, the stats poll adds up to 3 taps per second, starting with one immediate tap that doesn't depend on page timers.
 
 ### 🖼️ Video-Only Picture-in-Picture (PiP) Window
 - **Always-on-Top Floating Window**: Detaches any active stream into a floating, resizable mini-player.
@@ -120,11 +124,13 @@ Run unmonitored on home servers, Raspberry Pi, or cloud VPS instances with a sle
 - **Discord Webhook Alerts**: Formatted rich embeds sent to your Discord channel when a favorited streamer goes live or achieves milestone likes.
 - **Telegram Bot Alerts**: Instant messages delivered directly to your Telegram chat or group.
 - **Like Milestones**: Configurable alerts for major achievements: **10k, 25k, 50k, 100k, 250k, 500k, and 1,000,000 likes**.
+- **Likes Stopped Counting**: Alert when a stream's likes haven't counted for 3+ minutes (TikTok limit, rejected likes, or no confirmations, e.g. after being logged out), plus a follow-up when they count again.
 - **One-Click Diagnostic Testing**: Test buttons in the settings dialog let you verify notification delivery instantly.
 
 ### ⏱️ 100% Server-Verified Like Counting
-- **Dual Network Interception**: Hooks into `window.fetch` and `XMLHttpRequest.prototype.send` to capture exact outgoing batch sizes (`count=...`).
+- **Dual Network Interception**: Hooks into `window.fetch` and `XMLHttpRequest.prototype.send` and reads the batch size from the JSON body TikTok posts to `/webcast/room/like/` (`{"count": N, ...}`).
 - **Response Validation**: Credits likes only upon verified HTTP 200 responses with `status_code === 0`.
+- **Delivery Status**: Shows ⏸️ **TikTok limit** (with countdown), ⚠️ **Likes rejected**, or ⚠️ **Not counting** (30+ taps without a confirmation) wherever likes are displayed.
 - **Bounded Delivery Metric**: Cleanly bounds the confirmation rate display between `0.0%` and `100.0%` while preserving 100% of real likes in cumulative statistics.
 
 ### 📊 Deep Analytics & Export
@@ -132,6 +138,7 @@ Run unmonitored on home servers, Raspberry Pi, or cloud VPS instances with a sle
 - **Top Creators Leaderboard**: Creators ranked by verified likes delivered with session counts, delivery accuracy, and last-active timestamps.
 - **14-Day Activity Bar Chart**: Visualizes daily likes delivered and watch time trends.
 - **Stream Sessions Lifecycle**: Automatically records when streamers go live, likes delivered, and when they go offline.
+- **TikTok Limit History**: Each session records how often and how long TikTok limited likes, plus the like delay used, so you can compare delay settings.
 - **📥 CSV Data Export**: One-click download of full session history and raw analytics logs.
 
 ### ☁️ Multi-Device Cloud Synchronization
@@ -139,7 +146,8 @@ Run unmonitored on home servers, Raspberry Pi, or cloud VPS instances with a sle
   - **📁 Shared Folder / Cloud Drive**: Point to any folder inside your **Dropbox**, **Google Drive**, **OneDrive**, or **Syncthing** directory. Zero setup required!
   - **🌐 WebDAV**: Connect to **Nextcloud**, **ownCloud**, or **Fastmail**.
   - **⚡ REST API Server**: Self-hosted or centralized sync server with API key authorization.
-- **🍪 Cross-Device TikTok Session & Cookie Sync**: Synchronizes authenticated TikTok login cookies (`sessionid`) so headless Linux servers like under your personal account.
+- **🍪 Encrypted TikTok Session & Cookie Sync**: Synchronizes TikTok login cookies (`sessionid`) so headless Linux servers like under your personal account. Cookies are encrypted (AES-256-GCM, scrypt key) with a passphrase you enter on every device and are never synced without one. Signing out on one device signs out the others.
+- **🔑 Credentials Stay Local**: Sync passwords, API keys, Discord webhooks and Telegram bot tokens are never written to the sync target.
 - **Conflict-Free Merging**: Last-Write-Wins (LWW) resolution with deletion tombstones prevents deleted creators from reappearing.
 
 ### 🖥️ Native Browser Engine Architecture
@@ -204,16 +212,21 @@ xvfb-run -a python tiktok_live_auto_liker_tapper.py --headless --port 8080
 ```
 
 ### 2. Access the Web Dashboard
-Open your browser and navigate to:
+The dashboard requires a login and listens on `127.0.0.1` by default. On startup the server prints a login link:
 ```
-http://<your-server-ip>:8080
+Web Dashboard: http://127.0.0.1:8080/#token=<access-token>
 ```
+- The token is generated on first start and saved as `dashboard_token.txt` in the data folder. Set `TIKTOK_AUTOLIKER_TOKEN` or pass `--token` to choose your own.
+- From another computer, use an SSH tunnel (`ssh -L 8080:127.0.0.1:8080 your-server`) and open the link locally.
+- To listen on the network, start with `--host 0.0.0.0` and put an HTTPS reverse proxy in front before exposing it to the internet.
 
 ### 3. Deploy with Docker
 ```bash
 cd server
 docker compose up -d
+docker logs tiktok-live-autoliker   # shows the dashboard login link
 ```
+The compose file publishes the dashboard on `127.0.0.1:8080` of the host only.
 
 ### 4. Deploy with Systemd (Ubuntu / Debian / CentOS)
 ```bash
@@ -232,8 +245,9 @@ sudo systemctl enable --now tiktok-autoliker
    - **📁 Shared Folder**: Select a folder inside Google Drive, Dropbox, OneDrive, or Syncthing.
    - **🌐 WebDAV**: Enter your Nextcloud / ownCloud server URL, username, and app password.
    - **⚡ REST API**: Enter your central sync server URL and API key.
-4. Check **Sync TikTok login session & cookies** to enable authenticated headless liking.
+4. Check **Sync TikTok login session & cookies** and enter a **cookie passphrase**. Use the same passphrase on every device; cookies are not synced without one.
 5. Click **Test Connection**, then **Save & Apply**.
+6. Using the REST sync server? Start it with an API key: `python sync_server.py --host 0.0.0.0 --api-key <secret>` (it refuses to listen on the network without one).
 
 ---
 

@@ -5,14 +5,18 @@ Zero external dependencies (uses standard library http.server).
 Can be deployed on a VPS, Raspberry Pi, Docker, or home server.
 
 Usage:
-    python sync_server.py [--port 8765] [--api-key mysecretkey] [--data-file sync_data.json]
+    python sync_server.py [--host 127.0.0.1] [--port 8765] [--api-key mysecretkey] [--data-file sync_data.json]
+
+An API key (--api-key or TIKTOK_SYNC_API_KEY) is required unless the server only listens on localhost.
 """
 
 import os
 import sys
+import hmac
 import json
 import time
 import argparse
+import ipaddress
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import Optional
 
@@ -25,6 +29,7 @@ except ImportError:
 
 DATA_FILE = "sync_data.json"
 API_KEY: Optional[str] = None
+MAX_BODY_BYTES = 10_000_000
 
 
 class SyncHTTPRequestHandler(BaseHTTPRequestHandler):
@@ -35,31 +40,18 @@ class SyncHTTPRequestHandler(BaseHTTPRequestHandler):
         self.send_response(status_code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(payload)))
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type, X-API-Key")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(payload)
 
     def _is_authorized(self) -> bool:
         if not API_KEY:
-            return True
+            return True  # only reachable when listening on localhost or started with --allow-no-auth
+        expected = API_KEY.encode("utf-8")
         auth_header = self.headers.get("Authorization", "")
-        if auth_header.startswith("Bearer "):
-            token = auth_header[7:].strip()
-            if token == API_KEY:
-                return True
-        api_key_header = self.headers.get("X-API-Key", "").strip()
-        if api_key_header == API_KEY:
+        if auth_header.startswith("Bearer ") and hmac.compare_digest(auth_header[7:].strip().encode("utf-8"), expected):
             return True
-        return False
-
-    def do_OPTIONS(self):
-        self.send_response(204)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type, X-API-Key")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.end_headers()
+        return hmac.compare_digest(self.headers.get("X-API-Key", "").strip().encode("utf-8"), expected)
 
     def do_GET(self):
         parsed_path = self.path.split("?")[0].rstrip("/")
@@ -108,6 +100,9 @@ class SyncHTTPRequestHandler(BaseHTTPRequestHandler):
 
             try:
                 content_len = int(self.headers.get("Content-Length", 0))
+                if content_len > MAX_BODY_BYTES:
+                    self._send_json(413, {"error": "Payload too large"})
+                    return
                 body = self.rfile.read(content_len).decode("utf-8")
                 incoming_data = json.loads(body)
                 incoming_bundle = SyncBundle.from_dict(incoming_data)
@@ -150,8 +145,23 @@ class SyncHTTPRequestHandler(BaseHTTPRequestHandler):
         sys.stdout.flush()
 
 
-def run_server(host: str = "0.0.0.0", port: int = 8765, api_key: Optional[str] = None, data_file: str = "sync_data.json"):
+def is_loopback_host(host: str) -> bool:
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def run_server(host: str = "127.0.0.1", port: int = 8765, api_key: Optional[str] = None, data_file: str = "sync_data.json",
+               allow_no_auth: bool = False):
     global DATA_FILE, API_KEY
+    if not api_key and not is_loopback_host(host) and not allow_no_auth:
+        raise SystemExit(
+            f"Refusing to listen on {host} without an API key: anyone who can reach this port could read and "
+            "overwrite your synced data. Pass --api-key (or set TIKTOK_SYNC_API_KEY), or --allow-no-auth to override."
+        )
     DATA_FILE = os.path.abspath(data_file)
     API_KEY = api_key
 
@@ -179,10 +189,14 @@ def run_server(host: str = "0.0.0.0", port: int = 8765, api_key: Optional[str] =
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="TikTok Live Auto Liker Central Sync Server")
-    parser.add_argument("--host", default="0.0.0.0", help="Host address to bind to (default: 0.0.0.0)")
+    parser.add_argument("--host", default="127.0.0.1", help="Host address to bind to (default: 127.0.0.1)")
     parser.add_argument("--port", type=int, default=8765, help="Port to listen on (default: 8765)")
-    parser.add_argument("--api-key", default=None, help="Optional secret API key for authorization")
+    parser.add_argument("--api-key", default=os.environ.get("TIKTOK_SYNC_API_KEY") or None,
+                        help="Secret API key clients must send (default: TIKTOK_SYNC_API_KEY)")
+    parser.add_argument("--allow-no-auth", action="store_true",
+                        help="Allow listening on a non-localhost address without an API key (not recommended)")
     parser.add_argument("--data-file", default="sync_data.json", help="Path to JSON file to persist sync data")
     args = parser.parse_args()
 
-    run_server(host=args.host, port=args.port, api_key=args.api_key, data_file=args.data_file)
+    run_server(host=args.host, port=args.port, api_key=args.api_key, data_file=args.data_file,
+               allow_no_auth=args.allow_no_auth)

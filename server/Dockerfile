@@ -32,5 +32,6 @@ COPY . .
 # Expose web dashboard port
 EXPOSE 8080
 
-# Run with virtual display via xvfb-run
-CMD ["xvfb-run", "-a", "python3", "headless_runner.py", "--port", "8080"]
+# Run with virtual display via xvfb-run. Inside the container the dashboard must listen on all
+# interfaces; docker-compose.yml decides who can reach it. The login link is printed in `docker logs`.
+CMD ["xvfb-run", "-a", "python3", "headless_runner.py", "--host", "0.0.0.0", "--port", "8080"]

@@ -11,5 +11,8 @@ pyobjc-framework-Cocoa>=10.0; sys_platform == 'darwin'
 # Windows Native Edge WebView2 Engine
 qtwebview2>=0.1.0; sys_platform == 'win32'
 
+# Encrypted TikTok cookie sync (AES-GCM)
+cryptography>=41.0.0
+
 # Standalone Executable Packaging
 pyinstaller>=6.0.0

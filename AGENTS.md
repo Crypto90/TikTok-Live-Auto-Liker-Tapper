@@ -163,6 +163,9 @@ python build.py
 ## 4. GitHub Release & CI/CD Workflow
 
 The repository uses `.github/workflows/build.yml` with a decoupled 2-stage architecture:
+0. **Stage 0: Lint & Tests (`test`)**
+   - Runs `ruff check .` (bug-catching rules from `ruff.toml`) and `pytest` on `ubuntu-22.04` with Node.js for the in-page script tests.
+   - The build matrix has `needs: test`, so a failing test blocks all binaries.
 1. **Stage 1: Parallel Matrix Compilation (`build`)**
    - Runs concurrently on `windows-latest`, `macos-latest`, and `ubuntu-22.04` with `fail-fast: false`.
    - Generates executables and uploads them to GitHub Actions artifact storage.
@@ -214,7 +217,7 @@ The repository uses `.github/workflows/build.yml` with a decoupled 2-stage archi
    name: "vX.Y.Z - <Your Release Title>"
    ```
 5. **Test Locally**:
-   Run `python3 tiktok_live_auto_liker_tapper.py` or unit checks to confirm everything functions.
+   Run `ruff check .` and `pytest -q` (install `requirements-dev.txt` first), then launch `python3 tiktok_live_auto_liker_tapper.py`.
 6. **Commit Version Bump & Tag**:
    ```bash
    git add tiktok_live_auto_liker_tapper.py RELEASE_NOTES.md .github/workflows/build.yml AGENTS.md README.md
@@ -286,3 +289,19 @@ The repository uses `.github/workflows/build.yml` with a decoupled 2-stage archi
 - **Symptom**: Running `headless_runner.py` on an unmonitored Linux server without an X11/Wayland desktop displays: `qt.qpa.xcb: could not connect to display`.
 - **Root Cause**: QtWebEngine Chromium renderer requires an X11 display context to initialize its GPU/compositor structures, even in headless mode.
 - **Rule**: Run with `xvfb-run -a python headless_runner.py --port 8080` (or use the provided `server/tiktok-autoliker.service` or Docker container which configure Xvfb automatically).
+
+### 🚨 Gotcha 10: Browser Timer Throttling in Background Tabs
+- **Symptom**: Streams in background tabs or a minimized window like far slower than the visible tab (measured: ~1 timer run/s when hidden, ~1/min after 5 minutes hidden).
+- **Root Cause**: Chromium throttles timers in hidden pages; the in-page tapping loop is a `setTimeout` chain. WebKit on macOS does the same, plus App Nap.
+- **Rule**: `webview_engine.py` sets `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` and appends to `QTWEBENGINE_CHROMIUM_FLAGS` at import time (`BACKGROUND_THROTTLING_FLAGS`). Never overwrite these env vars after importing `webview_engine`, and never create a WebView2 before importing it. All WebView2 instances sharing a user data folder must use identical arguments.
+
+### 🚨 Gotcha 11: Web Dashboard & Sync Security
+- **Rule 1**: Every `/api/*` route except `/api/login`, `/api/logout` and `/api/auth` requires the access token (session cookie or `Authorization: Bearer`). Add new routes after the `_require_auth()` check.
+- **Rule 2**: Never add CORS headers; cross-site requests are rejected via `Origin`/`Sec-Fetch-Site`.
+- **Rule 3**: API responses must not contain stored secrets. Return `*_set` booleans instead (see `get_sync_config`), and treat a blank secret in a save request as "keep the saved value".
+- **Rule 4**: Render any server data in the dashboard through `esc()`; usernames in `onclick` handlers go through `esc(JSON.stringify(...))`.
+
+### 🚨 Gotcha 12: What May Leave the Device During Sync
+- **Rule 1**: Settings listed in `LOCAL_ONLY_SETTINGS` / `LOCAL_ONLY_NOTIFICATION_KEYS` (sync credentials, Discord webhook, Telegram token) are stripped by `public_settings()` before pushing and restored with `keep_local_secrets()` after pulling. Add new credentials to those lists.
+- **Rule 2**: TikTok cookies only travel as `cookies_encrypted` (AES-256-GCM, scrypt-derived key from the user's cookie passphrase). Without a passphrase, or with a passphrase that doesn't match the target, cookies are left out of the merge and the target's encrypted cookies are preserved.
+- **Rule 3**: Cookie merge is Last-Write-Wins including empty lists, so a newer sign-out propagates to all devices.

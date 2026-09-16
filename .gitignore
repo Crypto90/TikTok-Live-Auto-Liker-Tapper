@@ -23,3 +23,13 @@ Thumbs.db
 
 # Executables
 *.exe
+
+# Secrets & runtime state written next to the app when run from source
+cookies.json
+dashboard_token.txt
+sync_state.json
+stats.json
+
+# Test & lint caches
+.pytest_cache/
+.ruff_cache/
