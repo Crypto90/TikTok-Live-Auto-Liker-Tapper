@@ -15,6 +15,7 @@ import hashlib
 import secrets
 import ipaddress
 import threading
+import traceback
 from http.cookies import SimpleCookie, CookieError
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlsplit
@@ -1994,6 +1995,27 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
         return True
 
     def do_GET(self):
+        self._guarded(self._handle_get)
+
+    def do_POST(self):
+        self._guarded(self._handle_post)
+
+    def _guarded(self, handler):
+        try:
+            handler()
+        except (TimeoutError, RuntimeError):
+            self._send_error_response(503, "Server busy, try again")
+        except Exception:
+            traceback.print_exc()
+            self._send_error_response(500, "Internal server error")
+
+    def _send_error_response(self, status: int, message: str):
+        try:
+            self._send_json(status, {"error": message})
+        except OSError:
+            pass  # client already disconnected
+
+    def _handle_get(self):
         runner = self.runner_ref
         path = self.path.split("?")[0].rstrip("/")
 
@@ -2108,7 +2130,7 @@ class DashboardHTTPRequestHandler(BaseHTTPRequestHandler):
 
         self._send_json(404, {"error": "Not found"})
 
-    def do_POST(self):
+    def _handle_post(self):
         runner = self.runner_ref
         path = self.path.split("?")[0].rstrip("/")
 

@@ -578,6 +578,7 @@ TAPPER_IN_PAGE_SCRIPT = r"""
 
     window.__tiktokGetStats = function() {
         return {
+            pageId: stats.startTime,
             dispatched: stats.dispatched,
             verified: stats.verified,
             failed: stats.failed,

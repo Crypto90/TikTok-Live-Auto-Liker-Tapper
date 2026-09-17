@@ -111,3 +111,50 @@ def test_session_records_limits_and_csv(tmp_path):
     header, row = mgr.export_csv().splitlines()[:2]
     assert header.endswith("TikTok Limits,Limited (s),Like Delay (ms)")
     assert row.endswith(",2,190,220")
+
+
+def page(page_id, **kw):
+    return dict(reading(**kw), pageId=page_id)
+
+
+def test_counters_continue_across_page_reloads():
+    proc = TapperStatsProcessor()
+    t = 1000.0
+    proc.process(page(111, dispatched=17_500, verified=17_000, failed=30, blockCount=2, limitedSeconds=40), t, True, SETTINGS)
+
+    # Page reloading: the tapper isn't injected yet, so the stats call returns zeros without a pageId
+    loading = proc.process(reading(dispatched=0, verified=0), t + 1, True, SETTINGS)
+    assert (loading.dispatched, loading.verified) == (17_500, 17_000)
+
+    fresh = proc.process(page(222, dispatched=0, verified=0), t + 2, True, SETTINGS)
+    assert (fresh.dispatched, fresh.verified, fresh.failed) == (17_500, 17_000, 30)
+
+    later = proc.process(page(222, dispatched=520, verified=510, failed=5, blockCount=1, limitedSeconds=12), t + 110, True, SETTINGS)
+    assert (later.dispatched, later.verified, later.failed) == (18_020, 17_510, 35)
+    assert (later.limit_count, later.limited_seconds) == (3, 52)
+    assert later.burst_taps == 0  # a reload is not mistaken for a stalled loop
+
+
+def test_late_reading_from_replaced_page_counts_once():
+    proc = TapperStatsProcessor()
+    proc.process(page(111, dispatched=100, verified=90), 0.0, True, SETTINGS)
+    proc.process(page(222, dispatched=5, verified=0), 1.0, True, SETTINGS)
+
+    # Old page answers late with its final batch: only its gain is added, and only once
+    late = proc.process(page(111, dispatched=115, verified=105), 1.1, True, SETTINGS)
+    assert (late.dispatched, late.verified) == (120, 105)
+    again = proc.process(page(111, dispatched=115, verified=105), 1.2, True, SETTINGS)
+    assert (again.dispatched, again.verified) == (120, 105)
+
+    current = proc.process(page(222, dispatched=20, verified=15), 2.0, True, SETTINGS)
+    assert (current.dispatched, current.verified) == (135, 120)
+
+
+def test_session_stats_keep_growing_after_reload(tmp_path):
+    mgr = StatsManager(data_dir=str(tmp_path))
+    sid = mgr.start_session("creator")
+    proc = TapperStatsProcessor()
+    for page_id, verified, t in ((1, 17_000, 3600.0), (2, 0, 3601.0), (2, 17_000, 7200.0)):
+        snap = proc.process(page(page_id, dispatched=verified, verified=verified), t, True, SETTINGS)
+        mgr.record_progress(sid, snap.verified, snap.dispatched)
+    assert mgr.get_recent_sessions()[0]["verified_likes"] == 34_000

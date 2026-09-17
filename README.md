@@ -131,6 +131,7 @@ Run unmonitored on home servers, Raspberry Pi, or cloud VPS instances with a sle
 - **Dual Network Interception**: Hooks into `window.fetch` and `XMLHttpRequest.prototype.send` and reads the batch size from the JSON body TikTok posts to `/webcast/room/like/` (`{"count": N, ...}`).
 - **Response Validation**: Credits likes only upon verified HTTP 200 responses with `status_code === 0`.
 - **Delivery Status**: Shows ⏸️ **TikTok limit** (with countdown), ⚠️ **Likes rejected**, or ⚠️ **Not counting** (30+ taps without a confirmation) wherever likes are displayed.
+- **Counts Survive Page Reloads**: Streams reload every 60 minutes to free memory. Like counts, session statistics and milestones continue from where they were instead of starting over at 0.
 - **Bounded Delivery Metric**: Cleanly bounds the confirmation rate display between `0.0%` and `100.0%` while preserving 100% of real likes in cumulative statistics.
 
 ### 📊 Deep Analytics & Export

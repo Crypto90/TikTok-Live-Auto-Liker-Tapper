@@ -131,6 +131,13 @@ async function testRejectedAndUnconfirmed() {
   assert.equal(page.stats().delivery, 'ok');
 }
 
+async function testPageIdIdentifiesThisPage() {
+  const page = makePage();
+  const id = page.stats().pageId;
+  assert.equal(typeof id, 'number');
+  assert.equal(page.stats().pageId, id, 'stable for the lifetime of the page');
+}
+
 async function testBurstFirstTapIsImmediate() {
   const page = makePage();
   page.ctx.__tiktokSetTapperEnabled(true);
@@ -144,5 +151,6 @@ await testSniffer();
 await testFrequencyBlock();
 await testRejectedAndUnconfirmed();
 await testBurstFirstTapIsImmediate();
+await testPageIdIdentifiesThisPage();
 console.log('tapper JS tests passed');
 process.exit(0);

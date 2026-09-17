@@ -79,6 +79,8 @@ class LiveRateTracker:
 
 
 NOT_COUNTING_ALERT_S = 180
+# In-page counters restart whenever the page reloads (hourly recycle, manual refresh); these carry over
+CARRIED_COUNTERS = ("dispatched", "verified", "failed", "blockCount", "limitedSeconds")
 
 
 @dataclass
@@ -115,6 +117,38 @@ class TapperStatsProcessor:
         self._last_dispatched = 0
         self._not_counting_since = None
         self._alerted = False
+        self._page_id = None
+        self._page_counts = dict.fromkeys(CARRIED_COUNTERS, 0)
+        self._prev_page_id = None
+        self._prev_counts = dict.fromkeys(CARRIED_COUNTERS, 0)
+        self._carried = dict.fromkeys(CARRIED_COUNTERS, 0)
+
+    def _session_totals(self, res: dict, num) -> dict:
+        """Counters for the whole tab session, continuing across page reloads."""
+        page_id = res.get("pageId")
+        raw = {key: num(key) for key in CARRIED_COUNTERS}
+        if page_id is None and not any(raw.values()):
+            # Tapper not injected yet (page still loading): keep the last known values
+            return {key: self._carried[key] + self._page_counts[key] for key in CARRIED_COUNTERS}
+        if page_id is None:
+            page_id = "unidentified"
+
+        if page_id == self._prev_page_id:
+            # Late reading from the page that was just replaced: add only what it gained since its last reading
+            for key in CARRIED_COUNTERS:
+                gain = raw[key] - self._prev_counts[key]
+                if gain > 0:
+                    self._carried[key] += gain
+                    self._prev_counts[key] = raw[key]
+            raw = dict(self._page_counts)
+        elif page_id != self._page_id:
+            if self._page_id is not None:
+                for key in CARRIED_COUNTERS:
+                    self._carried[key] += self._page_counts[key]
+                self._prev_page_id, self._prev_counts = self._page_id, dict(self._page_counts)
+            self._page_id = page_id
+        self._page_counts = raw
+        return {key: self._carried[key] + raw[key] for key in CARRIED_COUNTERS}
 
     @staticmethod
     def parse(result_dict) -> Optional[dict]:
@@ -135,10 +169,11 @@ class TapperStatsProcessor:
             except (TypeError, ValueError):
                 return 0
 
+        totals = self._session_totals(res, num)
         snap = TapperSnapshot(
-            dispatched=num("dispatched"), verified=num("verified"), failed=num("failed"),
-            room_likes=num("roomLikes"), blocked_ms=num("blockedRemainingMs"), limit_count=num("blockCount"),
-            limited_seconds=num("limitedSeconds"), current_delay=num("currentDelay"),
+            dispatched=totals["dispatched"], verified=totals["verified"], failed=totals["failed"],
+            room_likes=num("roomLikes"), blocked_ms=num("blockedRemainingMs"), limit_count=totals["blockCount"],
+            limited_seconds=totals["limitedSeconds"], current_delay=num("currentDelay"),
         )
         snap.live_rate = self.rate.update(now, snap.verified, snap.dispatched, res.get("lastAckTime") or 0)
         if snap.dispatched > 0:

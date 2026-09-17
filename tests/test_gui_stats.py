@@ -53,6 +53,20 @@ def test_stats_bar_tab_and_session_updates():
     tab.stats_mgr.record_progress.assert_called_with("sess", 30, 35, 0, 0, limit_count=0, limited_seconds=0, like_delay_ms=200)
 
 
+def test_like_count_does_not_drop_after_page_reload():
+    tab, titles = fake_tab()
+    tab.pip_window = mock.Mock()
+    run(tab, pageId=1, dispatched=17_100, verified=17_000)
+    run(tab, dispatched=0, verified=0)  # reloading, tapper not injected yet
+    run(tab, pageId=2, dispatched=12, verified=0)
+    assert "17,000" in tab.lbl_verified.text and titles.last.endswith("(❤️ 17,000)")
+    run(tab, pageId=2, dispatched=25_100, verified=25_000)
+    assert "42,000" in tab.lbl_verified.text
+    tab.pip_window.update_likes.assert_called_with(42_000, "")
+    reached = [c.args[1] for c in tab.milestone_reached.emit.call_args_list]
+    assert reached == [10_000, 25_000]
+
+
 def test_limited_and_not_counting_states_render():
     tab, titles = fake_tab()
     run(tab, dispatched=60, verified=45, delivery="limited", blockedRemainingMs=95200, blockCount=2, limitedSeconds=12)

@@ -19,6 +19,7 @@ import json
 import signal
 import shutil
 import argparse
+import threading
 import subprocess
 from typing import Dict, Any, List, Tuple
 
@@ -60,7 +61,7 @@ def ensure_virtual_display_on_linux():
 xvfb_proc = ensure_virtual_display_on_linux()
 
 from PyQt6.QtWidgets import QApplication
-from PyQt6.QtCore import QTimer, QObject, pyqtSlot
+from PyQt6.QtCore import QTimer, QObject, QThread, Qt, pyqtSignal, pyqtSlot
 
 from webview_engine import UniversalWebView
 from sync_manager import SyncManager, get_device_name, public_settings
@@ -79,6 +80,83 @@ def get_server_data_dir() -> str:
 DATA_DIR = get_server_data_dir()
 USER_DATA_DIR = os.path.join(DATA_DIR, "userdata")
 os.makedirs(USER_DATA_DIR, exist_ok=True)
+
+
+class MainThreadDispatcher(QObject):
+    """Runs callables on the Qt main thread and waits for their result.
+
+    The web dashboard answers requests on its own thread, but the runner's methods touch Qt timers,
+    web views and dictionaries the main thread keeps changing. That is only safe on the main thread.
+    """
+    _job = pyqtSignal(object)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._closed = False
+        self._pending = set()
+        self._job.connect(self._run, Qt.ConnectionType.QueuedConnection)
+
+    @pyqtSlot(object)
+    def _run(self, job):
+        job()
+
+    def call(self, fn, *args, timeout: float = 15.0):
+        if QThread.currentThread() == self.thread():
+            return fn(*args)
+        if self._closed:
+            raise RuntimeError("Server is shutting down")
+        done = threading.Event()
+        outcome = {}
+
+        def job():
+            if done.is_set():
+                return  # caller already gave up
+            try:
+                outcome["result"] = fn(*args)
+            except Exception as exc:
+                outcome["error"] = exc
+            finally:
+                done.set()
+
+        self._pending.add(done)
+        try:
+            self._job.emit(job)
+            finished = done.wait(timeout)
+        finally:
+            self._pending.discard(done)
+        if "error" in outcome:
+            raise outcome["error"]
+        if "result" in outcome:
+            return outcome["result"]
+        done.set()
+        if not finished:
+            raise TimeoutError(f"{getattr(fn, '__name__', 'call')} did not run on the main thread within {timeout:.0f}s")
+        raise RuntimeError("Server is shutting down")
+
+    def close(self):
+        """Fail pending and future calls, so shutdown doesn't wait on requests the main thread won't serve."""
+        self._closed = True
+        for done in list(self._pending):
+            done.set()
+
+
+class DashboardRunnerProxy:
+    """The runner as the web dashboard sees it: method calls run on the Qt main thread.
+
+    Sync and connection tests only do network I/O without touching Qt, so they stay on the
+    request thread instead of blocking the main thread for up to 15 seconds.
+    """
+    OFF_MAIN_THREAD = frozenset({"trigger_sync", "test_sync_config"})
+
+    def __init__(self, runner, dispatcher: MainThreadDispatcher):
+        self._runner = runner
+        self._dispatcher = dispatcher
+
+    def __getattr__(self, name):
+        attr = getattr(self._runner, name)
+        if not callable(attr) or name in self.OFF_MAIN_THREAD:
+            return attr
+        return lambda *args: self._dispatcher.call(attr, *args)
 
 
 class HeadlessStreamTab(QObject):
@@ -247,7 +325,9 @@ class HeadlessServerManager(QObject):
         self.web_server = None
         if self.enable_web:
             token = access_token or load_or_create_access_token(DATA_DIR)
-            self.web_server = HeadlessWebServer(host=host, port=self.port, runner_ref=self, access_token=token)
+            self._dispatcher = MainThreadDispatcher(self)
+            dashboard_runner = DashboardRunnerProxy(self, self._dispatcher)
+            self.web_server = HeadlessWebServer(host=host, port=self.port, runner_ref=dashboard_runner, access_token=token)
             self.web_server.start()
 
         # 5. Monitoring loop (every 10 seconds)
@@ -613,6 +693,7 @@ class HeadlessServerManager(QObject):
         if hasattr(self, 'stats_mgr'):
             self.stats_mgr.save_now()
         if self.web_server:
+            self._dispatcher.close()
             self.web_server.stop()
         for tab in self.active_streams.values():
             tab.cleanup()

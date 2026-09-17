@@ -117,6 +117,28 @@ def test_no_cors_preflight(server):
     assert resp.getheader("Access-Control-Allow-Origin") is None
 
 
+def test_runner_failures_return_error_responses():
+    class SlowRunner:
+        def get_status_summary(self):
+            raise TimeoutError("main thread busy")
+
+        def get_favorites_list(self):
+            raise KeyError("bug")
+
+    srv = HeadlessWebServer(host="127.0.0.1", port=0, runner_ref=SlowRunner(), access_token=TOKEN)
+    srv.start()
+    try:
+        auth = {"Authorization": f"Bearer {TOKEN}"}
+        resp, body = request(srv, "GET", "/api/status", headers=auth)
+        assert resp.status == 503 and json.loads(body)["error"]
+        resp, _ = request(srv, "GET", "/api/favorites", headers=auth)
+        assert resp.status == 500
+        resp, _ = request(srv, "GET", "/api/auth")
+        assert resp.status == 200  # server keeps serving afterwards
+    finally:
+        srv.stop()
+
+
 def test_server_requires_token():
     with pytest.raises(ValueError):
         HeadlessWebServer(access_token="")

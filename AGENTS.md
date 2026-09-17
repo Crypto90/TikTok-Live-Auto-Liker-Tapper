@@ -261,7 +261,8 @@ The repository uses `.github/workflows/build.yml` with a decoupled 2-stage archi
 ### 🚨 Gotcha 5: Memory Leak & Error 36 Mitigation
 - **Rule 1 (In-Page Tapping Loop)**: Never use a high-frequency Python timer (`QTimer`) to send JS evaluation calls for tapping. Inject the in-page loop (`window.__tiktokStartTapper`) ONCE upon page load.
 - **Rule 2 (DOM Cleanup)**: Background tabs must clean up DOM animations (like particles, gift effects) every 3 seconds to prevent Chromium/WebKit renderer memory leaks.
-- **Rule 3 (Stream Recycling)**: Live streams open longer than 2 hours are recycled via `_recycle_if_stale()` to completely flush accumulated media buffers.
+- **Rule 3 (Stream Recycling)**: Live streams open longer than 60 minutes (`_RECYCLE_THRESHOLD_S`) are reloaded via `_recycle_if_stale()` to flush accumulated media buffers.
+- **Rule 4 (Counters Across Reloads)**: Every reload (recycle or manual refresh) restarts the in-page counters at 0. `__tiktokGetStats()` returns `pageId` (the tapper's start time), and `TapperStatsProcessor` adds the previous pages' counts to the new page's, ignoring late readings from replaced pages beyond their gain. Always read like counts from the processor snapshot, never from the raw stats, or totals, sessions and milestones drop back every hour.
 
 ### 🚨 Gotcha 6: Vector Icons vs. System Emoji Fonts
 - **Symptom**: Heart icons or buttons appear tiny (7px wide) or misaligned on macOS/Linux compared to Windows.
@@ -300,6 +301,7 @@ The repository uses `.github/workflows/build.yml` with a decoupled 2-stage archi
 - **Rule 2**: Never add CORS headers; cross-site requests are rejected via `Origin`/`Sec-Fetch-Site`.
 - **Rule 3**: API responses must not contain stored secrets. Return `*_set` booleans instead (see `get_sync_config`), and treat a blank secret in a save request as "keep the saved value".
 - **Rule 4**: Render any server data in the dashboard through `esc()`; usernames in `onclick` handlers go through `esc(JSON.stringify(...))`.
+- **Rule 5 (Threads)**: The dashboard's HTTP server runs on its own thread. The headless runner hands it a `DashboardRunnerProxy`, which runs every runner method on the Qt main thread via `MainThreadDispatcher`. Only methods that do network I/O without touching Qt objects or runner state may be listed in `OFF_MAIN_THREAD`. Never pass the runner itself as `runner_ref`.
 
 ### 🚨 Gotcha 12: What May Leave the Device During Sync
 - **Rule 1**: Settings listed in `LOCAL_ONLY_SETTINGS` / `LOCAL_ONLY_NOTIFICATION_KEYS` (sync credentials, Discord webhook, Telegram token) are stripped by `public_settings()` before pushing and restored with `keep_local_secrets()` after pulling. Add new credentials to those lists.
