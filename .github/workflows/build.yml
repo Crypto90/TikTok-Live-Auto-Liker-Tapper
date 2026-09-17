@@ -131,7 +131,7 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          name: "v1.2.2 - Like Counting Fix, Full-Speed Background Tabs & Secured Sync"
+          name: "v1.2.3 - Counts Survive Reloads, Lightweight Live Detection & Crash-Safe Saving"
           body_path: RELEASE_NOTES.md
           files: |
             release_assets/TikTokLiveAutoLiker.exe

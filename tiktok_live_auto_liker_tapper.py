@@ -43,7 +43,7 @@ def _qt_message_handler(mode, context, message):
         logging.getLogger("qt").warning(message)
 
 
-APP_VERSION = "v1.2.2"
+APP_VERSION = "v1.2.3"
 GITHUB_REPO = "Crypto90/TikTok-Live-Auto-Liker-Tapper"
 
 

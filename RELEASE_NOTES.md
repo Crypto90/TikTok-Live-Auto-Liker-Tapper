@@ -1,47 +1,31 @@
-# 🚀 TikTok Live Auto Liker v1.2.2
+# 🚀 TikTok Live Auto Liker v1.2.3
 
-Fixes the frozen like counter, keeps background streams tapping at full speed, and locks down the headless dashboard and cloud sync.
-
----
-
-## 🌟 What's New in v1.2.2
-
-### ❤️ Like Counting Fixed
-- **Stats bar no longer stuck at 0**: A crash in the stats update kept `Verified`, `likes/s` and `Confirmed` frozen at their starting values.
-- **Batches counted correctly**: TikTok sends likes in batches of up to 15. Each batch is now credited with its real size instead of 1.
-- **Steady likes/s readout**: The rate no longer jumps every time a batch arrives.
-
-### 🏃 Full Speed in Background Tabs
-- Streams in background tabs or a minimized window were slowed by the browser to about 1 tap per second, and to about 1 per minute after 5 minutes. They now tap at full speed (measured: 0.02 → 4.98 timer runs per second).
-
-### 🎯 Matched to TikTok's Limits
-- TikTok's web player allows one like per 200ms via the `L` shortcut. New defaults: **200ms delay + 5ms jitter** (~4.9 likes/s at ~100% confirmed). Saved delays below 200ms are raised to 200ms.
-- When TikTok temporarily blocks likes, tapping pauses until the block ends.
-
-### 🚦 "Likes Not Counting" Indicator & Alerts
-- ⏸️ **TikTok limit** (with countdown), ⚠️ **Likes rejected** and ⚠️ **Not counting** appear in the stats bar, tab title, grid cards, PiP window and web dashboard.
-- Optional desktop, Discord and Telegram alert when a stream's likes stop counting for 3+ minutes, plus a note when they recover (Alerts & Webhooks settings).
-- Session history and CSV export now show how often and how long TikTok limited likes, and the delay used.
-
-### 🔐 Security
-- **Web dashboard login**: The headless dashboard now requires an access token and listens on `127.0.0.1` by default. The login link is printed at startup; use `--host 0.0.0.0` to allow other machines (preferably behind HTTPS).
-- **Encrypted cookie sync**: TikTok session cookies are synced only when encrypted with a **cookie passphrase**. Enter the same passphrase on every device in Cloud Sync settings. Without one, cookies stay on the device.
-- **Credentials stay local**: Sync passwords, API keys, Discord webhooks and Telegram tokens are no longer written to the sync folder or server. Existing sync files are cleaned on the next sync.
-- **Sign-out syncs**: Signing out on one device now signs out the others instead of being undone.
-- **Sync server**: `sync_server.py` refuses to listen on the network without an API key.
-
-### 🛠️ Also Fixed
-- `tiktok_live_auto_liker_tapper.py --headless` no longer exits with an argument error.
-- The "Sync TikTok Session Cookies" switch is now respected.
-- Web dashboard activity log shows messages again.
+Like counts that survive the hourly stream reload, faster and lighter live detection, crash-safe saving, and an error log.
 
 ---
 
-## ⚠️ Before You Update
+## 🌟 What's New in v1.2.3
 
-- **Update all devices that use Cloud Sync.** Older versions don't understand encrypted cookies and would upload credentials again.
-- **Set a cookie passphrase** on each device if you sync TikTok cookies.
-- **Headless server users**: Log in with the link from the console (`docker logs` / `journalctl`). Docker and systemd now publish the dashboard on localhost only; see the README to reach it remotely.
+### ❤️ Like Counts No Longer Reset Every Hour
+- Streams reload every 60 minutes to free memory (and when you press refresh). Previously the like counter started over at 0 each time, session statistics only kept the highest single hour, and milestones like 25k or 50k could be missed on long streams.
+- Counts, session statistics, leaderboard, CSV export and milestones now continue across reloads. Example: two hours with 17,000 likes each now show 34,000 instead of 17,000.
+
+### ⚡ Faster, Lighter Live Detection
+- Live status now comes from one small TikTok request per creator (~10 KB, well under a second) instead of loading every creator's live page with video in hidden browsers.
+- Less CPU, memory and data use, especially with many favorites. The previous page check remains as an automatic fallback.
+
+### 💾 Crash-Safe Saving
+- Favorites, settings, cookies and statistics are saved atomically with a backup copy. A crash or power loss while saving can no longer leave you with an empty favorites list.
+
+### 📄 Error Log
+- Errors, crashes and engine warnings are now written to `logs/autoliker.log` in the app's data folder. Open it with the new **📄 Logs** button in the sidebar and attach it when reporting a problem.
+
+### 🖥️ Headless Server
+- Web dashboard actions now run safely on the app's main thread, removing a source of random crashes when adding, removing or toggling creators.
+- Busy or failing requests answer with an error message instead of dropping the connection.
+
+### ℹ️ Background Streams
+- Measured: a stream in a background tab stops decoding its video by itself (CPU 13.8% → 1.6% of one core) while tapping continues at full speed. No change needed.
 
 ---
 
@@ -55,10 +39,10 @@ Download the standalone package for your operating system below:
 
 ## 📥 How to update
 
-Download the archive or executable for your platform and replace your previous file. Your favorites, settings, cookies and statistics carry over.
+Download the archive or executable for your platform and replace your previous file. Your favorites, settings, cookies and statistics carry over. Coming from v1.2.1 or older? See the v1.2.2 notes: set a cookie passphrase for Cloud Sync and log in to the headless dashboard with the link from the console.
 
 ---
 
 ## 💖 Support
 
-[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/K3K314GUP?ref=tiktok_live_auto_liker_release_122)
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/K3K314GUP?ref=tiktok_live_auto_liker_release_123)
