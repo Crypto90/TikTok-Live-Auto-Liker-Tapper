@@ -18,6 +18,7 @@ import time
 import json
 import signal
 import shutil
+import logging
 import argparse
 import threading
 import subprocess
@@ -67,6 +68,8 @@ from webview_engine import UniversalWebView
 from sync_manager import SyncManager, get_device_name, public_settings
 from web_server import HeadlessWebServer, load_or_create_access_token
 from stats_manager import StatsManager, TapperStatsProcessor
+from app_logging import setup_logging
+from storage import read_json, write_json
 
 
 def get_server_data_dir() -> str:
@@ -316,10 +319,8 @@ class HeadlessServerManager(QObject):
         self.active_streams: Dict[str, HeadlessStreamTab] = {}
         self.avatars: Dict[str, str] = {}
 
-        # 3. Checkers
-        self.workers = []
-        self.idle_workers = []
-        self.check_queue = []
+        # 3. Live status checker (created on the first monitoring tick)
+        self.live_checker = None
 
         # 4. Web Dashboard
         self.web_server = None
@@ -352,65 +353,34 @@ class HeadlessServerManager(QObject):
         if len(self.logs) > 300:
             self.logs.pop(0)
         print(f"[{t_str}] {message}")
+        logging.getLogger("headless").info(message)
 
     def _load_favorites(self) -> dict:
-        fav_file = os.path.join(DATA_DIR, "favorites.json")
-        if os.path.exists(fav_file):
-            try:
-                with open(fav_file, "r") as f:
-                    data = json.load(f)
-                    if isinstance(data, list):
-                        return {u: True for u in data}
-                    return data
-            except Exception:
-                pass
-        return {}
+        data = read_json(os.path.join(DATA_DIR, "favorites.json"), {})
+        if isinstance(data, list):
+            return {u: True for u in data}
+        return data if isinstance(data, dict) else {}
 
     def _load_settings(self) -> dict:
-        set_file = os.path.join(DATA_DIR, "settings.json")
         default_s = {"like_delay_ms": 200, "randomization_ms": 5, "adaptive_rate": True}
-        if os.path.exists(set_file):
-            try:
-                with open(set_file, "r") as f:
-                    data = json.load(f)
-                    default_s.update(data)
-            except Exception:
-                pass
+        data = read_json(os.path.join(DATA_DIR, "settings.json"), {})
+        if isinstance(data, dict):
+            default_s.update(data)
         return default_s
 
-    # --- Live Checking Worker Pool ---
+    def _save_favorites(self):
+        write_json(os.path.join(DATA_DIR, "favorites.json"), self.favorites)
 
-    def _get_or_create_worker(self):
-        from tiktok_live_auto_liker_tapper import CheckerWorker
-        worker = CheckerWorker(parent=self)
-        worker.status_checked.connect(self._on_user_status_checked)
-        worker.ready.connect(self._on_worker_ready)
-        self.workers.append(worker)
-        return worker
+    # --- Live Checking ---
 
-    def _on_worker_ready(self, worker):
-        if worker not in self.idle_workers:
-            self.idle_workers.append(worker)
-        self._process_queue()
-
-    def _process_queue(self):
-        while self.check_queue and self.idle_workers:
-            user = self.check_queue.pop(0)
-            worker = self.idle_workers.pop(0)
-            worker.check_user(user)
+    LIVE_RECHECK_S = 30  # the monitor ticks every 10s; ask about each creator at most this often
 
     def _monitor_tick(self):
-        # Refresh checker pool if empty
-        if not self.workers:
-            for _ in range(3):
-                w = self._get_or_create_worker()
-                self.idle_workers.append(w)
-
-        # Enqueue favorite creators not already in check queue
-        for user in self.favorites.keys():
-            if user not in self.check_queue:
-                self.check_queue.append(user)
-        self._process_queue()
+        if self.live_checker is None:
+            from tiktok_live_auto_liker_tapper import LiveChecker
+            self.live_checker = LiveChecker(pool_size=3)
+            self.live_checker.status_checked.connect(self._on_user_status_checked)
+        self.live_checker.check_users(list(self.favorites.keys()), min_interval_s=self.LIVE_RECHECK_S)
 
         # Check for ended streams
         ended = [un for un, s in self.active_streams.items() if not s.is_active]
@@ -524,16 +494,14 @@ class HeadlessServerManager(QObject):
     def add_favorite(self, username: str):
         if username not in self.favorites:
             self.favorites[username] = True
-            with open(os.path.join(DATA_DIR, "favorites.json"), "w") as f:
-                json.dump(self.favorites, f, indent=2)
+            self._save_favorites()
             self.log(f"[WEB] Added @{username} to favorites.")
             self.sync_mgr.record_local_change()
 
     def remove_favorite(self, username: str):
         if username in self.favorites:
             del self.favorites[username]
-            with open(os.path.join(DATA_DIR, "favorites.json"), "w") as f:
-                json.dump(self.favorites, f, indent=2)
+            self._save_favorites()
             self.sync_mgr.record_deletion(username)
             if username in self.active_streams:
                 tab = self.active_streams.pop(username)
@@ -557,8 +525,7 @@ class HeadlessServerManager(QObject):
 
             curr["updated_at"] = time.time()
             self.favorites[username] = curr
-            with open(os.path.join(DATA_DIR, "favorites.json"), "w") as f:
-                json.dump(self.favorites, f, indent=2)
+            self._save_favorites()
             self.sync_mgr.record_local_change()
 
     def get_settings(self) -> dict:
@@ -578,8 +545,7 @@ class HeadlessServerManager(QObject):
             allowed["adaptive_rate"] = bool(new_s["adaptive_rate"])
         self.settings.update(allowed)
         self.settings["updated_at"] = time.time()
-        with open(os.path.join(DATA_DIR, "settings.json"), "w") as f:
-            json.dump(self.settings, f, indent=2)
+        write_json(os.path.join(DATA_DIR, "settings.json"), self.settings)
         for s in self.active_streams.values():
             s.update_settings(self.settings)
         self.log(f"[WEB] Settings updated: Delay={self.settings.get('like_delay_ms')}ms, Rand={self.settings.get('randomization_ms')}ms")
@@ -689,6 +655,8 @@ class HeadlessServerManager(QObject):
     def cleanup(self):
         self.monitor_timer.stop()
         self.status_log_timer.stop()
+        if self.live_checker:
+            self.live_checker.cleanup()
         self.sync_mgr.stop()
         if hasattr(self, 'stats_mgr'):
             self.stats_mgr.save_now()
@@ -711,6 +679,8 @@ def main():
     parser.add_argument("--no-web", action="store_true", help="Disable the built-in web dashboard")
     parser.add_argument("--sync-only", action="store_true", help="Run a single sync cycle and exit immediately")
     args = parser.parse_args()
+
+    setup_logging(DATA_DIR)
 
     if args.sync_only:
         print("Running one-time synchronization...")

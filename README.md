@@ -150,12 +150,15 @@ Run unmonitored on home servers, Raspberry Pi, or cloud VPS instances with a sle
 - **🍪 Encrypted TikTok Session & Cookie Sync**: Synchronizes TikTok login cookies (`sessionid`) so headless Linux servers like under your personal account. Cookies are encrypted (AES-256-GCM, scrypt key) with a passphrase you enter on every device and are never synced without one. Signing out on one device signs out the others.
 - **🔑 Credentials Stay Local**: Sync passwords, API keys, Discord webhooks and Telegram bot tokens are never written to the sync target.
 - **Conflict-Free Merging**: Last-Write-Wins (LWW) resolution with deletion tombstones prevents deleted creators from reappearing.
+- **Crash-Safe Local Files**: Favorites, settings, cookies and statistics are saved atomically with a backup copy, so a crash or power loss while saving can't wipe them.
 
 ### 🖥️ Native Browser Engine Architecture
 - **macOS**: Native **Apple WebKit (`WKWebView`)** via `pyobjc-framework-WebKit` with hardware-accelerated H.264/HEVC/AAC video decoding and minimal CPU/memory footprint.
 - **Windows**: **Microsoft Edge WebView2 (`qtwebview2`)** with low-memory Chromium flags.
 - **Linux**: **`PyQt6-WebEngine`** with DocumentCreation codec shims for seamless TikTok Live player mounting.
 - **Zero-Leak In-Page Engine**: Native JavaScript tapping loop executes directly in the DOM, eliminating IPC queue congestion and V8 heap growth. Floating heart animations are pruned automatically every 3 seconds.
+- **Lightweight Live Detection**: Live status comes from one small TikTok API request per creator (~10 KB) instead of loading each creator's live page with video in a hidden browser. The page check only runs as a fallback.
+- **Error Log**: Errors, crashes and engine warnings are written to `logs/autoliker.log` in the data folder. The **📄 Logs** button in the sidebar opens it; attach that file when reporting a problem.
 
 ---
 

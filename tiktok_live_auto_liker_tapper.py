@@ -6,6 +6,7 @@ os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--disable-logging --log-level=3 --di
 os.environ["QT_LOGGING_RULES"] = "qt.qpa.fonts.warning=false"
 
 import json
+import logging
 import random
 import shutil
 import math
@@ -13,6 +14,7 @@ import time
 import threading
 import urllib.request
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 from PyQt6.QtWidgets import (
@@ -22,10 +24,13 @@ from PyQt6.QtWidgets import (
     QDialog, QComboBox, QCheckBox, QRadioButton, QButtonGroup, QStackedWidget,
     QTableWidget, QTableWidgetItem, QHeaderView, QGridLayout, QSystemTrayIcon, QScrollArea
 )
-from PyQt6.QtCore import Qt, QUrl, QTimer, pyqtSignal, QObject, pyqtSlot, QMetaObject, qInstallMessageHandler, QStandardPaths, QSize, QRect
+from PyQt6.QtCore import Qt, QUrl, QTimer, pyqtSignal, QObject, pyqtSlot, QMetaObject, qInstallMessageHandler, QStandardPaths, QSize, QRect, QtMsgType
 from PyQt6.QtGui import QPainter, QColor, QIcon, QPixmap, QPainterPath, QDesktopServices, QFont
 from PyQt6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
 
+from app_logging import log_dir_for, setup_logging
+from live_status import LiveStatusError, fetch_live_status
+from storage import read_json, write_json
 from webview_engine import UniversalWebView, get_best_engine_class
 from sync_manager import SyncManager, FolderSyncBackend, WebDAVSyncBackend, RestSyncBackend
 from stats_manager import StatsManager, TapperStatsProcessor, format_limits
@@ -34,6 +39,8 @@ from stats_manager import StatsManager, TapperStatsProcessor, format_limits
 def _qt_message_handler(mode, context, message):
     if "setPointSize" in message or "Point size" in message or "QFont" in message:
         return
+    if mode in (QtMsgType.QtWarningMsg, QtMsgType.QtCriticalMsg, QtMsgType.QtFatalMsg):
+        logging.getLogger("qt").warning(message)
 
 
 APP_VERSION = "v1.2.2"
@@ -324,24 +331,17 @@ class UserListItem(QWidget):
 class SettingsManager:
     @staticmethod
     def load_favorites():
-        if os.path.exists(FAVORITES_FILE):
-            try:
-                with open(FAVORITES_FILE, 'r') as f:
-                    data = json.load(f)
-                    if isinstance(data, list):
-                        return {user: True for user in data}
-                    return data
-            except Exception:
-                pass
-        return {}
+        data = read_json(FAVORITES_FILE, {})
+        if isinstance(data, list):
+            return {user: True for user in data}
+        return data if isinstance(data, dict) else {}
 
     @staticmethod
     def save_favorites(favorites):
         try:
-            with open(FAVORITES_FILE, 'w') as f:
-                json.dump(favorites, f, indent=2)
-        except Exception:
-            pass
+            write_json(FAVORITES_FILE, favorites)
+        except OSError:
+            logging.getLogger("storage").exception("Could not save favorites")
 
     @staticmethod
     def load_settings():
@@ -350,28 +350,23 @@ class SettingsManager:
             "randomization_ms": 5,
             "adaptive_rate": True
         }
-        if os.path.exists(SETTINGS_FILE):
-            try:
-                with open(SETTINGS_FILE, 'r') as f:
-                    settings = json.load(f)
-                    # TikTok throttles the like shortcut to one like per 200ms; shorter delays only waste taps
-                    if settings.get("like_delay_ms", 200) < 200:
-                        settings["like_delay_ms"] = 200
-                        settings["randomization_ms"] = 5
-                    if "adaptive_rate" not in settings:
-                        settings["adaptive_rate"] = True
-                    default_settings.update(settings)
-            except Exception:
-                pass
+        settings = read_json(SETTINGS_FILE)
+        if isinstance(settings, dict):
+            # TikTok throttles the like shortcut to one like per 200ms; shorter delays only waste taps
+            if settings.get("like_delay_ms", 200) < 200:
+                settings["like_delay_ms"] = 200
+                settings["randomization_ms"] = 5
+            if "adaptive_rate" not in settings:
+                settings["adaptive_rate"] = True
+            default_settings.update(settings)
         return default_settings
 
     @staticmethod
     def save_settings(settings):
         try:
-            with open(SETTINGS_FILE, 'w') as f:
-                json.dump(settings, f, indent=2)
-        except Exception:
-            pass
+            write_json(SETTINGS_FILE, settings)
+        except OSError:
+            logging.getLogger("storage").exception("Could not save settings")
 
 
 class CheckerWorker(QObject):
@@ -496,36 +491,87 @@ class CheckerWorker(QObject):
 
 
 class LiveChecker(QObject):
-    status_checked = pyqtSignal(str, bool, str, bool)
+    """Checks whether creators are live.
 
-    def __init__(self, pool_size=2, max_retries=2):
+    Asks TikTok's web API first (one small request per creator, off the UI thread). Creators the API
+    can't answer for fall back to loading their live page in a hidden browser, created only when needed.
+    """
+    status_checked = pyqtSignal(str, bool, str, bool)  # (username, is_live, avatar_url, is_error)
+    _api_done = pyqtSignal(str, object)  # (username, LiveStatus | LiveStatusError), emitted from API threads
+
+    API_PAUSE_AFTER_BLOCK_S = 600
+
+    def __init__(self, pool_size=2, max_retries=2, api_threads=4):
         super().__init__()
-        self.queue = []
+        self.pool_size = pool_size
+        self.queue = []  # creators waiting for a page check
         self.retry_counts = {}
         self.max_retries = max_retries
         self.workers = []
         self.idle_workers = []
-        for _ in range(pool_size):
-            worker = CheckerWorker(self)
-            worker.status_checked.connect(self._on_worker_status)
-            worker.ready.connect(self._on_worker_ready)
-            self.workers.append(worker)
-            self.idle_workers.append(worker)
+        self._in_flight = set()
+        self._last_result_at = {}
+        self._api_paused_until = 0.0
+        self._closed = False
+        self._executor = ThreadPoolExecutor(max_workers=api_threads, thread_name_prefix="live-status")
+        self._api_done.connect(self._on_api_done)
 
-    def check_users(self, users):
-        if not users:
+    def check_users(self, users, min_interval_s=0.0):
+        now = time.time()
+        for u in users or []:
+            if u in self._in_flight or u in self.queue:
+                continue
+            if min_interval_s and now - self._last_result_at.get(u, 0.0) < min_interval_s:
+                continue
+            if now < self._api_paused_until:
+                self._queue_page_check(u)
+                continue
+            self._in_flight.add(u)
+            self._executor.submit(self._api_lookup, u)
+
+    def _api_lookup(self, username):
+        try:
+            outcome = fetch_live_status(username)
+        except LiveStatusError as exc:
+            outcome = exc
+        except Exception as exc:
+            outcome = LiveStatusError(repr(exc))
+        if self._closed:
             return
-        for u in users:
-            self.retry_counts[u] = 0
-            if u not in self.queue:
-                self.queue.append(u)
+        try:
+            self._api_done.emit(username, outcome)
+        except RuntimeError:
+            pass  # checker was deleted while the request was running
+
+    def _on_api_done(self, username, outcome):
+        self._in_flight.discard(username)
+        if self._closed:
+            return
+        if isinstance(outcome, LiveStatusError):
+            if outcome.blocked:
+                self._api_paused_until = time.time() + self.API_PAUSE_AFTER_BLOCK_S
+                logging.getLogger("live").warning("TikTok live status API refused (%s); checking pages for 10 minutes", outcome)
+            else:
+                logging.getLogger("live").info("Live status API failed for @%s (%s); checking the page", username, outcome)
+            self._queue_page_check(username)
+            return
+        self._last_result_at[username] = time.time()
+        self.status_checked.emit(username, outcome.is_live, outcome.avatar_url, False)
+
+    def _queue_page_check(self, username):
+        self.retry_counts.setdefault(username, 0)
+        if username not in self.queue:
+            self.queue.append(username)
         self._process_queue()
 
     def _on_worker_status(self, username, is_live, avatar_url, is_error):
         if is_error and self.retry_counts.get(username, 0) < self.max_retries:
-            self.retry_counts[username] += 1
+            self.retry_counts[username] = self.retry_counts.get(username, 0) + 1
             QTimer.singleShot(2000, lambda u=username: self._requeue_user(u))
         else:
+            self.retry_counts.pop(username, None)
+            if not is_error:
+                self._last_result_at[username] = time.time()
             self.status_checked.emit(username, is_live, avatar_url, is_error)
 
     def _requeue_user(self, username):
@@ -538,12 +584,20 @@ class LiveChecker(QObject):
         self._process_queue()
 
     def _process_queue(self):
+        while self.queue and not self.idle_workers and len(self.workers) < self.pool_size:
+            worker = CheckerWorker(self)
+            worker.status_checked.connect(self._on_worker_status)
+            worker.ready.connect(self._on_worker_ready)
+            self.workers.append(worker)
+            self.idle_workers.append(worker)
         while self.queue and self.idle_workers:
             user = self.queue.pop(0)
             worker = self.idle_workers.pop(0)
             worker.check_user(user)
 
     def cleanup(self):
+        self._closed = True
+        self._executor.shutdown(wait=False, cancel_futures=True)
         for worker in self.workers:
             worker.cleanup()
         self.workers.clear()
@@ -3401,11 +3455,18 @@ class TikTokAutoLikerApp(QMainWindow):
         self.notif_btn.setStyleSheet(btn_style)
         self.notif_btn.clicked.connect(self.open_notification_settings)
 
+        self.logs_btn = QPushButton("📄 Logs")
+        self.logs_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.logs_btn.setStyleSheet(btn_style)
+        self.logs_btn.setToolTip("Open the folder with the error log (attach autoliker.log when reporting a problem)")
+        self.logs_btn.clicked.connect(self.open_log_folder)
+
         data_layout.addWidget(self.backup_btn, 0, 0)
         data_layout.addWidget(self.restore_btn, 0, 1)
         data_layout.addWidget(self.cloud_sync_btn, 1, 0)
         data_layout.addWidget(self.analytics_btn, 1, 1)
-        data_layout.addWidget(self.notif_btn, 2, 0, 1, 2)
+        data_layout.addWidget(self.notif_btn, 2, 0)
+        data_layout.addWidget(self.logs_btn, 2, 1)
         left_layout.addWidget(data_container)
 
         # Update Banner
@@ -4439,6 +4500,11 @@ class TikTokAutoLikerApp(QMainWindow):
         except Exception as e:
             print(f"Error displaying desktop notification: {e}")
 
+    def open_log_folder(self):
+        log_dir = log_dir_for(DATA_DIR)
+        os.makedirs(log_dir, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(log_dir))
+
     def _on_delivery_alert(self, username: str, kind: str, detail: str, seconds: int):
         if not self.settings.get("notifications", {}).get("notify_not_counting", True):
             return
@@ -4613,6 +4679,8 @@ if __name__ == "__main__":
         headless_main()
         sys.exit(0)
 
+    setup_logging(DATA_DIR)
+    logging.getLogger("app").info("TikTok Live Auto Liker %s starting, data folder %s", APP_VERSION, DATA_DIR)
     app = QApplication(sys.argv)
     qInstallMessageHandler(_qt_message_handler)
 

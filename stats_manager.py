@@ -2,10 +2,15 @@ import os
 import json
 import time
 import uuid
+import logging
 import threading
 from dataclasses import dataclass
-from typing import Optional
 from datetime import datetime, timezone
+from typing import Optional
+
+from storage import read_json, write_json
+
+log = logging.getLogger("stats")
 
 
 def describe_delivery(stats: dict):
@@ -253,30 +258,21 @@ class StatsManager:
 
     def _load(self):
         with self._lock:
-            if os.path.exists(self.stats_file):
-                try:
-                    with open(self.stats_file, "r", encoding="utf-8") as f:
-                        loaded = json.load(f)
-                    if isinstance(loaded, dict):
-                        self.data["all_time"] = loaded.get("all_time", self.data["all_time"])
-                        self.data["streamers"] = loaded.get("streamers", {})
-                        self.data["sessions"] = loaded.get("sessions", [])
-                        self.data["daily_summary"] = loaded.get("daily_summary", {})
-                        self.data["updated_at"] = loaded.get("updated_at", time.time())
-                except Exception as e:
-                    print(f"[StatsManager] Error loading stats: {e}")
+            loaded = read_json(self.stats_file)
+            if isinstance(loaded, dict):
+                self.data["all_time"] = loaded.get("all_time", self.data["all_time"])
+                self.data["streamers"] = loaded.get("streamers", {})
+                self.data["sessions"] = loaded.get("sessions", [])
+                self.data["daily_summary"] = loaded.get("daily_summary", {})
+                self.data["updated_at"] = loaded.get("updated_at", time.time())
 
     def save_now(self):
         with self._lock:
             self.data["updated_at"] = time.time()
             try:
-                os.makedirs(self.data_dir, exist_ok=True)
-                temp_file = f"{self.stats_file}.tmp_{os.getpid()}"
-                with open(temp_file, "w", encoding="utf-8") as f:
-                    json.dump(self.data, f, indent=2, ensure_ascii=False)
-                os.replace(temp_file, self.stats_file)
-            except Exception as e:
-                print(f"[StatsManager] Error saving stats: {e}")
+                write_json(self.stats_file, self.data, ensure_ascii=False)
+            except OSError:
+                log.exception("Could not save stats")
 
     def _debounce_save(self, delay=2.0):
         with self._lock:

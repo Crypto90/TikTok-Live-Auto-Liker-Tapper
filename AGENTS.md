@@ -307,3 +307,19 @@ The repository uses `.github/workflows/build.yml` with a decoupled 2-stage archi
 - **Rule 1**: Settings listed in `LOCAL_ONLY_SETTINGS` / `LOCAL_ONLY_NOTIFICATION_KEYS` (sync credentials, Discord webhook, Telegram token) are stripped by `public_settings()` before pushing and restored with `keep_local_secrets()` after pulling. Add new credentials to those lists.
 - **Rule 2**: TikTok cookies only travel as `cookies_encrypted` (AES-256-GCM, scrypt-derived key from the user's cookie passphrase). Without a passphrase, or with a passphrase that doesn't match the target, cookies are left out of the merge and the target's encrypted cookies are preserved.
 - **Rule 3**: Cookie merge is Last-Write-Wins including empty lists, so a newer sign-out propagates to all devices.
+
+### 🚨 Gotcha 13: Errors Must Reach the Log File
+- **Symptom**: A bug fires on every poll (e.g. a `NameError` in a stats callback) but nobody sees anything; the packaged app has no console.
+- **Root Cause**: `qtwebview2` catches exceptions in `evaluate_js` callbacks and reports them via `logging`; without a handler they vanished. PyQt also aborts the app on exceptions in slots when `sys.excepthook` is the default.
+- **Rule**: `app_logging.setup_logging(DATA_DIR)` runs first in both entry points (desktop `__main__`, `headless_runner.main`). It writes `<data dir>/logs/autoliker.log` (rotating), installs `sys.excepthook`/`threading.excepthook`, and dumps hard crashes to `crash.log`. Report problems with `logging.getLogger(...)`, not `print` or a bare `except: pass`. The desktop sidebar's **📄 Logs** button opens the folder.
+
+### 🚨 Gotcha 14: Saving JSON Files
+- **Rule**: Read and write favorites, settings, cookies, sync state and stats only through `storage.read_json` / `storage.write_json`. Writes are atomic (temp file + `os.replace`), keep the previous readable version as `<file>.bak`, and are serialized per file across threads. A damaged file is recovered from the backup; a missing file is not (it returns the default).
+
+### 🚨 Gotcha 15: Live Status Checks
+- **Rule 1**: `LiveChecker` asks `live_status.fetch_live_status` (TikTok's `/api-live/user/room/`, `liveRoom.status == 2` means live) on a thread pool and emits results through a queued signal. Only when the API gives no trustworthy answer does it load the live page in a `CheckerWorker` browser, which is created lazily.
+- **Rule 2**: `LiveStatusError(blocked=True)` (HTTP 403/429, non-JSON, missing room status) pauses API use for 10 minutes. Per-user failures fall back to the page check without pausing.
+- **Rule 3**: The headless monitor ticks every 10 seconds, so it passes `min_interval_s` to avoid asking TikTok about each creator more than every 30 seconds. The desktop app's 60-second cycle must not skip creators (its progress counter waits for every result).
+
+### ℹ️ Note: Video in Background Tabs
+- Measured on a live stream in WebView2: when a stream tab goes to the background, the video pauses by itself (CPU 13.8% → 1.6% of one core) while the tapping timer keeps running at 4.98 runs/s. Explicitly pausing it saves nothing, so there is no extra pause logic. Visible streams (grid, PiP) keep playing.

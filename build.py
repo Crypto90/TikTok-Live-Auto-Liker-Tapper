@@ -99,6 +99,9 @@ def build_macos():
         "--add-data=webview_engine.py:.",
         "--add-data=sync_manager.py:.",
         "--add-data=stats_manager.py:.",
+        "--add-data=storage.py:.",
+        "--add-data=app_logging.py:.",
+        "--add-data=live_status.py:.",
         "--add-data=web_server.py:.",
         "--add-data=headless_runner.py:.",
     ]
@@ -140,6 +143,9 @@ def build_linux():
         "--add-data=webview_engine.py:.",
         "--add-data=sync_manager.py:.",
         "--add-data=stats_manager.py:.",
+        "--add-data=storage.py:.",
+        "--add-data=app_logging.py:.",
+        "--add-data=live_status.py:.",
         "--add-data=web_server.py:.",
         "--add-data=headless_runner.py:.",
     ]
@@ -164,6 +170,9 @@ def build_windows():
         "--add-data=webview_engine.py;.",
         "--add-data=sync_manager.py;.",
         "--add-data=stats_manager.py;.",
+        "--add-data=storage.py;.",
+        "--add-data=app_logging.py;.",
+        "--add-data=live_status.py;.",
         "--add-data=web_server.py;.",
         "--add-data=headless_runner.py;.",
     ]

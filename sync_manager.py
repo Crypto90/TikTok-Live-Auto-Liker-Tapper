@@ -16,12 +16,17 @@ import time
 import base64
 import socket
 import hashlib
+import logging
 import functools
 import threading
 import urllib.request
 import urllib.error
 import urllib.parse
 from typing import Dict, Any, Optional, Tuple, Callable
+
+from storage import read_json, write_json
+
+log = logging.getLogger("sync")
 
 # Try importing PyQt6 for signals; provide pure Python fallback if not available
 try:
@@ -708,25 +713,15 @@ class SyncManager(QObject):
     # --- Tombstone & State Persistence ---
 
     def _load_tombstones(self) -> Dict[str, float]:
-        if os.path.exists(self.sync_state_file):
-            try:
-                with open(self.sync_state_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    return data.get("tombstones", {})
-            except Exception:
-                pass
-        return {}
+        data = read_json(self.sync_state_file, {})
+        return data.get("tombstones", {}) if isinstance(data, dict) else {}
 
     def _save_sync_state(self):
-        try:
-            with open(self.sync_state_file, "w", encoding="utf-8") as f:
-                json.dump({
-                    "tombstones": self.tombstones,
-                    "last_sync_time": self.last_sync_time,
-                    "last_sync_status": self.last_sync_status
-                }, f, indent=2)
-        except Exception:
-            pass
+        self._write_json(self.sync_state_file, {
+            "tombstones": self.tombstones,
+            "last_sync_time": self.last_sync_time,
+            "last_sync_status": self.last_sync_status
+        })
 
     def record_deletion(self, username: str):
         """Record a deletion tombstone when a user removes a favorite locally."""
@@ -748,65 +743,42 @@ class SyncManager(QObject):
             "adaptive_rate": True,
             "updated_at": time.time()
         }
-        if os.path.exists(self.settings_file):
-            try:
-                with open(self.settings_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    default_settings.update(data)
-            except Exception:
-                pass
+        data = read_json(self.settings_file, {})
+        if isinstance(data, dict):
+            default_settings.update(data)
         return default_settings
 
     def _read_favorites(self) -> dict:
-        if os.path.exists(self.favorites_file):
-            try:
-                with open(self.favorites_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    if isinstance(data, list):
-                        return {u: True for u in data}
-                    return data
-            except Exception:
-                pass
-        return {}
+        data = read_json(self.favorites_file, {})
+        if isinstance(data, list):
+            return {u: True for u in data}
+        return data if isinstance(data, dict) else {}
 
     def _read_cookies(self) -> Tuple[list, float]:
-        if os.path.exists(self.cookies_file):
-            try:
-                with open(self.cookies_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    if isinstance(data, list):
-                        return data, os.path.getmtime(self.cookies_file)
-                    elif isinstance(data, dict):
-                        return data.get("cookies", []), float(data.get("updated_at", 0.0))
-            except Exception:
-                pass
+        data = read_json(self.cookies_file)
+        if isinstance(data, list):
+            return data, os.path.getmtime(self.cookies_file)
+        if isinstance(data, dict):
+            return data.get("cookies", []), float(data.get("updated_at", 0.0))
         return [], 0.0
 
-    def _write_settings(self, settings: dict):
+    @staticmethod
+    def _write_json(path: str, data):
         try:
-            with open(self.settings_file, "w", encoding="utf-8") as f:
-                json.dump(settings, f, indent=2)
-        except Exception:
-            pass
+            write_json(path, data)
+        except OSError:
+            log.exception("Could not save %s", path)
+
+    def _write_settings(self, settings: dict):
+        self._write_json(self.settings_file, settings)
 
     def _write_favorites(self, favorites: dict):
-        try:
-            with open(self.favorites_file, "w", encoding="utf-8") as f:
-                json.dump(favorites, f, indent=2)
-        except Exception:
-            pass
+        self._write_json(self.favorites_file, favorites)
 
     def _write_cookies(self, cookies: list, updated_at: float = None):
         if updated_at is None:
             updated_at = time.time()
-        try:
-            with open(self.cookies_file, "w", encoding="utf-8") as f:
-                json.dump({
-                    "updated_at": updated_at,
-                    "cookies": cookies
-                }, f, indent=2)
-        except Exception:
-            pass
+        self._write_json(self.cookies_file, {"updated_at": updated_at, "cookies": cookies})
 
     def update_local_cookies(self, cookies: list, updated_at: float = None):
         """Update cookies locally, write to cookies.json, emit signal, and schedule a cloud sync push."""
