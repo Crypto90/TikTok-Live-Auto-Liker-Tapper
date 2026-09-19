@@ -3641,7 +3641,6 @@ class TikTokAutoLikerApp(QMainWindow):
         """)
         self.btn_toggle_view.clicked.connect(self._toggle_view_mode)
 
-        corner_layout.addWidget(self.btn_toggle_view)
         corner_layout.addWidget(debug_btn)
         corner_layout.addWidget(refresh_btn)
         corner_layout.addWidget(self.signout_btn)
@@ -3660,7 +3659,23 @@ class TikTokAutoLikerApp(QMainWindow):
         self.grid_scroll.setWidget(self.grid_container)
         self.view_stack.addWidget(self.grid_scroll)
 
-        splitter.addWidget(self.view_stack)
+        # The Grid/Tab toggle must stay reachable in both modes, so it lives in a bar above the
+        # QStackedWidget instead of on self.tabs' corner widget, which is hidden once grid view
+        # is the active page (that was the bug: nothing to click to get back to tab view).
+        view_panel = QWidget()
+        view_panel_layout = QVBoxLayout(view_panel)
+        view_panel_layout.setContentsMargins(0, 0, 0, 0)
+        view_panel_layout.setSpacing(0)
+
+        view_toolbar = QWidget()
+        view_toolbar_layout = QHBoxLayout(view_toolbar)
+        view_toolbar_layout.setContentsMargins(6, 4, 6, 4)
+        view_toolbar_layout.addStretch()
+        view_toolbar_layout.addWidget(self.btn_toggle_view)
+        view_panel_layout.addWidget(view_toolbar)
+        view_panel_layout.addWidget(self.view_stack)
+
+        splitter.addWidget(view_panel)
         splitter.setSizes([350, 850])
 
     def _setup_webview_engine(self):
